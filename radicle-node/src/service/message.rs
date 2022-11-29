@@ -1,5 +1,6 @@
-use cyphernet::addr::NetAddr;
 use std::{fmt, io, mem};
+
+use cyphernet::addr::NetAddr;
 
 use crate::crypto;
 use crate::git;
@@ -8,7 +9,6 @@ use crate::node;
 use crate::prelude::BoundedVec;
 use crate::service::filter::Filter;
 use crate::service::{NodeId, Timestamp, DEFAULT_PORT, PROTOCOL_VERSION};
-use crate::storage::refs::Refs;
 use crate::wire;
 
 /// Maximum number of addresses which can be announced to other nodes.
