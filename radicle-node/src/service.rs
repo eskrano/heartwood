@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::{fmt, net, str};
 
 use crossbeam_channel as chan;
+use cyphernet::addr::{NetAddr, PeerAddr};
 use fastrand::Rng;
 use log::*;
 use nakamoto::{LocalDuration, LocalTime};
@@ -75,6 +76,9 @@ pub use message::ADDRESS_LIMIT;
 pub use message::INVENTORY_LIMIT;
 /// Maximum number of project git references imposed by message size limits.
 pub use message::REF_LIMIT;
+
+/// A pair of peer address and peer node id.
+pub type NodeAddr = PeerAddr<NodeId, NetAddr<DEFAULT_PORT>>;
 
 /// A service event.
 #[derive(Debug, Clone)]
