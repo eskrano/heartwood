@@ -537,6 +537,7 @@ where
         }
     }
 
+    // TODO: Use `Address` here
     pub fn attempted(&mut self, _addr: &net::SocketAddr) {
         // let address = Address::from(*addr);
         // let persistent = self.config.is_persistent(&address);
@@ -591,6 +592,7 @@ where
         }
     }
 
+    // TODO: Pass NodeId and reason by value
     pub fn disconnected(
         &mut self,
         id: &NodeId,
@@ -1148,6 +1150,7 @@ where
 #[derive(Debug)]
 pub enum DisconnectReason {
     User,
+    Peer,
     Error(session::Error),
 }
 
@@ -1155,6 +1158,7 @@ impl DisconnectReason {
     fn is_transient(&self) -> bool {
         match self {
             Self::User => false,
+            Self::Peer => false,
             Self::Error(..) => false,
         }
     }
