@@ -1,6 +1,6 @@
-use std::{fmt, io, mem};
+use std::{fmt, io, mem, net};
 
-use cyphernet::addr::NetAddr;
+use cyphernet::addr::{HostAddr, NetAddr};
 
 use crate::crypto;
 use crate::git;
@@ -32,6 +32,15 @@ impl fmt::Display for Hostname {
 #[derive(Wrapper, Clone, Eq, PartialEq, Debug, From)]
 #[wrapper(Deref, Display, FromStr)]
 pub struct Address(NetAddr<DEFAULT_PORT>);
+
+impl From<net::SocketAddr> for Address {
+    fn from(addr: net::SocketAddr) -> Self {
+        Address(NetAddr {
+            host: HostAddr::Ip(addr.ip()),
+            port: Some(addr.port()),
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subscribe {
