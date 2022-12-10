@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+
+use std::collections::BTreeMap;
 use std::iter;
 use std::net;
 use std::ops::{Deref, DerefMut};
@@ -7,13 +9,14 @@ use log::*;
 
 use crate::address;
 use crate::address::Store;
-use crate::clock::Timestamp;
+use crate::clock::{RefClock, Timestamp};
 use crate::crypto::test::signer::MockSigner;
 use crate::crypto::Signer;
 use crate::identity::Id;
 use crate::node;
-use crate::prelude::*;
+use crate::prelude::NodeId;
 use crate::service;
+use crate::service::config::*;
 use crate::service::message::*;
 use crate::service::reactor::Io;
 use crate::service::*;
@@ -21,7 +24,6 @@ use crate::storage::git::transport::remote;
 use crate::storage::{RemoteId, WriteStorage};
 use crate::test::arbitrary;
 use crate::test::simulator;
-use crate::test::storage::MockStorage;
 use crate::{Link, LocalDuration, LocalTime};
 
 /// Service instantiation used for testing.
@@ -31,8 +33,10 @@ pub type Service<S, G> = service::Service<routing::Table, address::Book, S, G>;
 pub struct Peer<S, G> {
     pub name: &'static str,
     pub service: Service<S, G>,
+    pub id: NodeId,
     pub ip: net::IpAddr,
     pub rng: fastrand::Rng,
+    pub local_time: LocalTime,
     pub local_addr: net::SocketAddr,
 
     initialized: bool,
@@ -66,32 +70,17 @@ impl<S, G> DerefMut for Peer<S, G> {
     }
 }
 
-impl Peer<MockStorage, MockSigner> {
-    pub fn new(name: &'static str, ip: impl Into<net::IpAddr>) -> Self {
-        Self::config(name, ip, MockStorage::empty(), Config::default())
-    }
-}
-
-pub struct Config<G: Signer + 'static> {
-    pub config: service::Config,
-    pub addrs: address::Book,
-    pub local_time: LocalTime,
-    pub signer: G,
-    pub rng: fastrand::Rng,
-}
-
-impl Default for Config<MockSigner> {
-    fn default() -> Self {
+impl<S> Peer<S, MockSigner>
+where
+    S: WriteStorage + 'static,
+{
+    pub fn new(name: &'static str, ip: impl Into<net::IpAddr>, storage: S) -> Self {
         let mut rng = fastrand::Rng::new();
         let signer = MockSigner::new(&mut rng);
 
-        Config {
-            config: service::Config::default(),
-            addrs: address::Book::memory().unwrap(),
-            local_time: LocalTime::now(),
-            signer,
-            rng,
-        }
+        let addrs = address::Book::memory().unwrap();
+        let id = signer.public_key().clone();
+        Self::config(name, Config::default(), id, ip, storage, addrs, signer, rng)
     }
 }
 
@@ -102,31 +91,29 @@ where
 {
     pub fn config(
         name: &'static str,
+        config: Config,
+        id: NodeId,
         ip: impl Into<net::IpAddr>,
         storage: S,
-        config: Config<G>,
+        addrs: address::Book,
+        signer: G,
+        rng: fastrand::Rng,
     ) -> Self {
+        let local_time = LocalTime::now();
+        let clock = RefClock::from(local_time);
         let routing = routing::Table::memory().unwrap();
-        let tracking = tracking::Config::memory().unwrap();
-        let service = Service::new(
-            config.config,
-            config.local_time,
-            routing,
-            storage,
-            config.addrs,
-            tracking,
-            config.signer,
-            config.rng.clone(),
-        );
+        let service = Service::new(config, clock, routing, storage, addrs, signer, rng.clone());
         let ip = ip.into();
-        let local_addr = net::SocketAddr::new(ip, config.rng.u16(..));
+        let local_addr = net::SocketAddr::new(ip, rng.u16(..));
 
         Self {
             name,
             service,
+            id,
             ip,
             local_addr,
-            rng: config.rng,
+            rng,
+            local_time,
             initialized: false,
         }
     }
@@ -165,7 +152,7 @@ where
     }
 
     pub fn timestamp(&self) -> Timestamp {
-        self.clock().as_secs()
+        self.service.clock().timestamp()
     }
 
     pub fn git_url(&self, repo: Id, namespace: Option<RemoteId>) -> remote::Url {
@@ -180,7 +167,7 @@ where
         self.service.node_id()
     }
 
-    pub fn receive(&mut self, peer: &net::SocketAddr, msg: Message) {
+    pub fn receive(&mut self, peer: NodeId, msg: Message) {
         self.service.received_message(peer, msg);
     }
 
@@ -213,7 +200,7 @@ where
     }
 
     pub fn refs_announcement(&self, id: Id) -> Message {
-        let refs = BoundedVec::new();
+        let refs = BTreeMap::new().into();
         let ann = AnnouncementMessage::from(RefsAnnouncement {
             id,
             refs,
@@ -226,17 +213,17 @@ where
 
     pub fn connect_from(&mut self, peer: &Self) {
         let remote = simulator::Peer::<S, G>::addr(peer);
-        let local = net::SocketAddr::new(self.ip, self.rng.u16(..));
+        let node_id = *self.signer().public_key();
 
         self.initialize();
-        self.service.connecting(remote, &local, Link::Inbound);
-        self.service.connected(remote, Link::Inbound);
+        self.service.attempted(&remote);
+        self.service.connected(node_id, Link::Inbound);
         self.receive(
-            &remote,
+            node_id,
             Message::init(peer.node_id(), Some(Address::from(remote)).into()),
         );
 
-        let mut msgs = self.messages(&remote);
+        let mut msgs = self.messages(node_id);
         msgs.find(|m| matches!(m, Message::Initialize { .. }))
             .expect("`initialize` is sent");
         msgs.find(|m| {
@@ -253,14 +240,13 @@ where
 
     pub fn connect_to(&mut self, peer: &Self) {
         let remote = simulator::Peer::<S, G>::addr(peer);
+        let node_id = *self.signer().public_key();
 
         self.initialize();
         self.service.attempted(&remote);
-        self.service
-            .connecting(remote, &self.local_addr, Link::Outbound);
-        self.service.connected(remote, Link::Outbound);
+        self.service.connected(node_id, Link::Outbound);
 
-        let mut msgs = self.messages(&remote);
+        let mut msgs = self.messages(node_id);
         msgs.find(|m| matches!(m, Message::Initialize { .. }))
             .expect("`initialize` is sent");
         msgs.find(|m| {
@@ -275,7 +261,7 @@ where
         .expect("`inventory-announcement` is sent");
 
         self.receive(
-            &remote,
+            node_id,
             Message::init(
                 peer.node_id(),
                 peer.config()
@@ -288,16 +274,16 @@ where
     }
 
     pub fn elapse(&mut self, duration: LocalDuration) {
-        self.clock_mut().elapse(duration);
+        self.clock().elapse(duration);
         self.service.wake();
     }
 
     /// Drain outgoing messages sent from this peer to the remote address.
-    pub fn messages(&mut self, remote: &net::SocketAddr) -> impl Iterator<Item = Message> {
+    pub fn messages(&mut self, remote: NodeId) -> impl Iterator<Item = Message> {
         let mut msgs = Vec::new();
 
         self.service.reactor().outbox().retain(|o| match o {
-            Io::Write(a, messages) if a == remote => {
+            Io::Write(a, messages) if *a == remote => {
                 msgs.extend(messages.clone());
                 false
             }

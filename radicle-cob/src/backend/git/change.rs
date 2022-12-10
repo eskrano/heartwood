@@ -3,13 +3,11 @@
 // This file is part of radicle-link, distributed under the GPLv3 with Radicle
 // Linking Exception. For full terms see the included LICENSE file.
 
-use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
 use git_commit::{self as commit, Commit};
 use git_ext::Oid;
 use git_trailers::OwnedTrailer;
-use nonempty::NonEmpty;
 
 use crate::history::entry::Timestamp;
 use crate::{
@@ -20,6 +18,7 @@ use crate::{
 };
 
 const MANIFEST_BLOB_NAME: &str = "manifest";
+const CHANGE_BLOB_NAME: &str = "change";
 
 pub mod error {
     use std::str::Utf8Error;
@@ -196,23 +195,14 @@ fn load_contents(
     repo: &git2::Repository,
     tree: &git2::Tree,
 ) -> Result<entry::Contents, error::Load> {
-    let ops = tree
-        .iter()
-        .filter_map(|entry| {
-            entry.kind().and_then(|kind| match kind {
-                git2::ObjectType::Blob => {
-                    let name = entry.name()?.parse::<i8>().ok()?;
-                    let content = entry.to_object(repo).and_then(|object| {
-                        object.peel_to_blob().map(|blob| blob.content().to_owned())
-                    });
-                    Some(content.map(|c| (name, c)))
-                }
-                _ => None,
-            })
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-
-    NonEmpty::collect(ops.into_values()).ok_or_else(|| error::Load::NoChange(tree.id().into()))
+    let contents_tree_entry = tree
+        .get_name(CHANGE_BLOB_NAME)
+        .ok_or_else(|| error::Load::NoChange(tree.id().into()))?;
+    let contents_object = contents_tree_entry.to_object(repo)?;
+    let contents_blob = contents_object
+        .as_blob()
+        .ok_or_else(|| error::Load::ChangeNotBlob(tree.id().into()))?;
+    Ok(contents_blob.content().to_owned())
 }
 
 fn write_commit<O>(
@@ -273,10 +263,8 @@ fn write_manifest(
         git2::FileMode::Blob.into(),
     )?;
 
-    for (ix, op) in contents.iter().enumerate() {
-        let change_blob = repo.blob(op.as_ref())?;
-        tb.insert(&ix.to_string(), change_blob, git2::FileMode::Blob.into())?;
-    }
+    let change_blob = repo.blob(contents.as_ref())?;
+    tb.insert(CHANGE_BLOB_NAME, change_blob, git2::FileMode::Blob.into())?;
 
     tb.write()
 }

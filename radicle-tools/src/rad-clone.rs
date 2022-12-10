@@ -11,8 +11,8 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(id) = env::args().nth(1) {
         let id = Id::from_str(&id)?;
-        let mut node = radicle::node::connect(profile.node())?;
-        let repo = radicle::rad::clone(id, &cwd, &signer, &profile.storage, &mut node)?;
+        let node = radicle::node::connect(profile.node())?;
+        let repo = radicle::rad::clone(id, &cwd, &signer, &profile.storage, &node)?;
 
         println!(
             "ok: project {id} cloned into `{}`",

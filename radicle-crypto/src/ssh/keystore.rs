@@ -5,7 +5,7 @@ use std::{fs, io};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::{keypair, Ecdh, PublicKey, SecretKey, SharedSecret, Signature, Signer, SignerError};
+use crate::{keypair, PublicKey, SecretKey, Signature, Signer, SignerError};
 
 /// A secret key passphrase.
 pub type Passphrase = Zeroizing<String>;
@@ -119,7 +119,7 @@ pub enum MemorySignerError {
 /// so that signing never fails.
 ///
 /// Can be created from a [`Keystore`] with the [`MemorySigner::load`] function.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MemorySigner {
     public: PublicKey,
     secret: Zeroizing<SecretKey>,
@@ -136,16 +136,6 @@ impl Signer for MemorySigner {
 
     fn try_sign(&self, msg: &[u8]) -> Result<Signature, SignerError> {
         Ok(self.sign(msg))
-    }
-}
-
-impl Ecdh for MemorySigner {
-    fn ecdh(&self, other: &PublicKey) -> Result<SharedSecret, ed25519_compact::Error> {
-        let pk = ed25519_compact::x25519::PublicKey::from_ed25519(other)?;
-        let sk = ed25519_compact::x25519::SecretKey::from_ed25519(&self.secret)?;
-        let ss = pk.dh(&sk)?;
-
-        Ok(*ss)
     }
 }
 

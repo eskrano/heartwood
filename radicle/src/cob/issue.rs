@@ -15,8 +15,6 @@ use crate::cob::{store, ObjectId, OpId, TypeName};
 use crate::crypto::{PublicKey, Signer};
 use crate::storage::git as storage;
 
-use super::op::Ops;
-
 /// Issue operation.
 pub type Op = crate::cob::Op<Action>;
 
@@ -47,7 +45,7 @@ pub enum CloseReason {
 /// Issue state.
 #[derive(Debug, Default, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
-pub enum State {
+pub enum Status {
     /// The issue is closed.
     Closed { reason: CloseReason },
     /// The issue is open.
@@ -55,7 +53,7 @@ pub enum State {
     Open,
 }
 
-impl std::fmt::Display for State {
+impl std::fmt::Display for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed { .. } => write!(f, "closed"),
@@ -64,11 +62,11 @@ impl std::fmt::Display for State {
     }
 }
 
-impl State {
+impl Status {
     pub fn lifecycle_message(self) -> String {
         match self {
-            State::Open => "Open issue".to_owned(),
-            State::Closed { .. } => "Close issue".to_owned(),
+            Status::Open => "Open issue".to_owned(),
+            Status::Closed { .. } => "Close issue".to_owned(),
         }
     }
 }
@@ -77,7 +75,7 @@ impl State {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     title: LWWReg<Max<String>, clock::Lamport>,
-    state: LWWReg<Max<State>, clock::Lamport>,
+    status: LWWReg<Max<Status>, clock::Lamport>,
     tags: LWWSet<Tag>,
     thread: Thread,
 }
@@ -85,7 +83,7 @@ pub struct Issue {
 impl Semilattice for Issue {
     fn merge(&mut self, other: Self) {
         self.title.merge(other.title);
-        self.state.merge(other.state);
+        self.status.merge(other.status);
         self.thread.merge(other.thread);
     }
 }
@@ -94,7 +92,7 @@ impl Default for Issue {
     fn default() -> Self {
         Self {
             title: Max::from(String::default()).into(),
-            state: Max::from(State::default()).into(),
+            status: Max::from(Status::default()).into(),
             tags: LWWSet::default(),
             thread: Thread::default(),
         }
@@ -112,8 +110,8 @@ impl store::FromHistory for Issue {
         history: &radicle_cob::History,
     ) -> Result<(Self, clock::Lamport), store::Error> {
         let obj = history.traverse(Self::default(), |mut acc, entry| {
-            if let Ok(Ops(ops)) = Ops::try_from(entry) {
-                if let Err(err) = acc.apply(ops) {
+            if let Ok(op) = Op::try_from(entry) {
+                if let Err(err) = acc.apply(op) {
                     log::warn!("Error applying op to issue state: {err}");
                     return ControlFlow::Break(acc);
                 }
@@ -132,8 +130,8 @@ impl Issue {
         self.title.get().as_str()
     }
 
-    pub fn state(&self) -> &State {
-        self.state.get()
+    pub fn status(&self) -> &Status {
+        self.status.get()
     }
 
     pub fn tags(&self) -> impl Iterator<Item = &Tag> {
@@ -152,34 +150,32 @@ impl Issue {
     }
 
     pub fn comments(&self) -> impl Iterator<Item = (&CommentId, &thread::Comment)> {
-        self.thread.comments()
+        self.thread.comments().map(|(id, comment)| (id, comment))
     }
 
-    pub fn apply(&mut self, ops: impl IntoIterator<Item = Op>) -> Result<(), Error> {
-        for op in ops {
-            match op.action {
-                Action::Title { title } => {
-                    self.title.set(title, op.clock);
+    pub fn apply(&mut self, op: Op) -> Result<(), Error> {
+        match op.action {
+            Action::Title { title } => {
+                self.title.set(title, op.clock);
+            }
+            Action::Lifecycle { status } => {
+                self.status.set(status, op.clock);
+            }
+            Action::Tag { add, remove } => {
+                for tag in add {
+                    self.tags.insert(tag, op.clock);
                 }
-                Action::Lifecycle { state } => {
-                    self.state.set(state, op.clock);
+                for tag in remove {
+                    self.tags.remove(tag, op.clock);
                 }
-                Action::Tag { add, remove } => {
-                    for tag in add {
-                        self.tags.insert(tag, op.clock);
-                    }
-                    for tag in remove {
-                        self.tags.remove(tag, op.clock);
-                    }
-                }
-                Action::Thread { action } => {
-                    self.thread.apply([cob::Op {
-                        action,
-                        author: op.author,
-                        clock: op.clock,
-                        timestamp: op.timestamp,
-                    }]);
-                }
+            }
+            Action::Thread { action } => {
+                self.thread.apply([cob::Op {
+                    action,
+                    author: op.author,
+                    clock: op.clock,
+                    timestamp: op.timestamp,
+                }]);
             }
         }
         Ok(())
@@ -208,8 +204,8 @@ impl<'a, 'g> IssueMut<'a, 'g> {
     }
 
     /// Lifecycle an issue.
-    pub fn lifecycle<G: Signer>(&mut self, state: State, signer: &G) -> Result<OpId, Error> {
-        let action = Action::Lifecycle { state };
+    pub fn lifecycle<G: Signer>(&mut self, status: Status, signer: &G) -> Result<OpId, Error> {
+        let action = Action::Lifecycle { status };
         self.apply("Lifecycle", action, signer)
     }
 
@@ -295,7 +291,7 @@ impl<'a, 'g> IssueMut<'a, 'g> {
             clock,
             timestamp,
         };
-        self.issue.apply([op])?;
+        self.issue.apply(op)?;
 
         Ok((clock, *signer.public_key()))
     }
@@ -388,7 +384,7 @@ impl<'a> Issues<'a> {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Action {
     Title { title: String },
-    Lifecycle { state: State },
+    Lifecycle { status: Status },
     Tag { add: Vec<Tag>, remove: Vec<Tag> },
     Thread { action: thread::Action },
 }
@@ -411,8 +407,8 @@ mod test {
     fn test_ordering() {
         assert!(CloseReason::Solved > CloseReason::Other);
         assert!(
-            State::Open
-                > State::Closed {
+            Status::Open
+                > Status::Closed {
                     reason: CloseReason::Solved
                 }
         );
@@ -434,7 +430,7 @@ mod test {
         assert_eq!(issue.author(), Some(issues.author()));
         assert_eq!(issue.description(), Some("Blah blah blah."));
         assert_eq!(issue.comments().count(), 1);
-        assert_eq!(issue.state(), &State::Open);
+        assert_eq!(issue.status(), &Status::Open);
     }
 
     #[test]
@@ -448,7 +444,7 @@ mod test {
 
         issue
             .lifecycle(
-                State::Closed {
+                Status::Closed {
                     reason: CloseReason::Other,
                 },
                 &signer,
@@ -458,15 +454,15 @@ mod test {
         let id = issue.id;
         let mut issue = issues.get_mut(&id).unwrap();
         assert_eq!(
-            *issue.state(),
-            State::Closed {
+            *issue.status(),
+            Status::Closed {
                 reason: CloseReason::Other
             }
         );
 
-        issue.lifecycle(State::Open, &signer).unwrap();
+        issue.lifecycle(Status::Open, &signer).unwrap();
         let issue = issues.get(&id).unwrap().unwrap();
-        assert_eq!(*issue.state(), State::Open);
+        assert_eq!(*issue.status(), Status::Open);
     }
 
     #[test]
@@ -566,12 +562,12 @@ mod test {
     #[test]
     fn test_issue_state_serde() {
         assert_eq!(
-            serde_json::to_value(State::Open).unwrap(),
+            serde_json::to_value(Status::Open).unwrap(),
             serde_json::json!({ "status": "open" })
         );
 
         assert_eq!(
-            serde_json::to_value(State::Closed {
+            serde_json::to_value(Status::Closed {
                 reason: CloseReason::Solved
             })
             .unwrap(),

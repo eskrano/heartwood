@@ -1,6 +1,12 @@
+use std::collections::HashMap;
+
 use super::nakamoto::LocalDuration;
 
+use crate::collections::HashSet;
+use crate::identity::{Id, PublicKey};
+use crate::service::filter::Filter;
 use crate::service::message::Address;
+use crate::service::NodeId;
 
 /// Peer-to-peer network.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
@@ -8,6 +14,35 @@ pub enum Network {
     #[default]
     Main,
     Test,
+}
+
+/// Project tracking policy.
+#[derive(Debug, Clone)]
+pub enum ProjectTracking {
+    /// Track all projects we come across.
+    All { blocked: HashSet<Id> },
+    /// Track a static list of projects.
+    Allowed(HashSet<Id>),
+}
+
+impl Default for ProjectTracking {
+    fn default() -> Self {
+        Self::All {
+            blocked: HashSet::default(),
+        }
+    }
+}
+
+/// Project remote tracking policy.
+#[derive(Debug, Default, Clone)]
+pub enum RemoteTracking {
+    /// Only track remotes of project delegates.
+    #[default]
+    DelegatesOnly,
+    /// Track all remotes.
+    All { blocked: HashSet<PublicKey> },
+    /// Track a specific list of users as well as the project delegates.
+    Allowed(HashSet<PublicKey>),
 }
 
 /// Configuration parameters defining attributes of minima and maxima.
@@ -33,25 +68,30 @@ impl Default for Limits {
 pub struct Config {
     /// Peers to connect to on startup.
     /// Connections to these peers will be maintained.
-    pub connect: Vec<Address>,
+    pub connect: HashMap<NodeId, Address>,
     /// Specify the node's public addresses
     pub external_addresses: Vec<Address>,
     /// Peer-to-peer network.
     pub network: Network,
+    /// Project tracking policy.
+    pub project_tracking: ProjectTracking,
+    /// Project remote tracking policy.
+    pub remote_tracking: RemoteTracking,
     /// Whether or not our node should relay inventories.
     pub relay: bool,
     /// List of addresses to listen on for protocol connections.
     pub listen: Vec<Address>,
-    /// Configured service limits.
     pub limits: Limits,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            connect: Vec::default(),
-            external_addresses: Vec::default(),
+            connect: HashMap::default(),
+            external_addresses: vec![],
             network: Network::default(),
+            project_tracking: ProjectTracking::default(),
+            remote_tracking: RemoteTracking::default(),
             relay: true,
             listen: vec![],
             limits: Limits::default(),
@@ -60,15 +100,38 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn new(network: Network) -> Self {
-        Self {
-            network,
-            ..Self::default()
+    pub fn is_persistent(&self, id: &NodeId) -> bool {
+        self.connect.contains_key(id)
+    }
+
+    pub fn is_tracking(&self, id: &Id) -> bool {
+        match &self.project_tracking {
+            ProjectTracking::All { blocked } => !blocked.contains(id),
+            ProjectTracking::Allowed(ids) => ids.contains(id),
         }
     }
 
-    pub fn is_persistent(&self, addr: &Address) -> bool {
-        self.connect.contains(addr)
+    /// Track a project. Returns whether the policy was updated.
+    pub fn track(&mut self, id: Id) -> bool {
+        match &mut self.project_tracking {
+            ProjectTracking::All { .. } => false,
+            ProjectTracking::Allowed(ids) => ids.insert(id),
+        }
+    }
+
+    /// Untrack a project. Returns whether the policy was updated.
+    pub fn untrack(&mut self, id: Id) -> bool {
+        match &mut self.project_tracking {
+            ProjectTracking::All { blocked } => blocked.insert(id),
+            ProjectTracking::Allowed(ids) => ids.remove(&id),
+        }
+    }
+
+    pub fn filter(&self) -> Filter {
+        match &self.project_tracking {
+            ProjectTracking::All { .. } => Filter::default(),
+            ProjectTracking::Allowed(ids) => Filter::new(ids.iter()),
+        }
     }
 
     pub fn alias(&self) -> [u8; 32] {

@@ -55,60 +55,38 @@ pub struct Handle<W: Waker> {
     pub(crate) waker: W,
 }
 
-impl<W: Waker> Handle<W> {
-    fn command(&self, cmd: service::Command) -> Result<(), Error> {
-        self.commands.send(cmd)?;
-        self.waker.wake()?;
-
-        Ok(())
-    }
-}
-
-impl<W: Waker> radicle::node::Handle for Handle<W> {
-    type Session = Session;
-    type FetchLookup = FetchLookup;
-    type Error = Error;
-
+impl<W: Waker> traits::Handle for Handle<W> {
     fn listening(&self) -> Result<net::SocketAddr, Error> {
         self.listening.recv().map_err(Error::from)
     }
 
-    fn fetch(&mut self, id: Id) -> Result<Self::FetchLookup, Error> {
+    fn fetch(&mut self, id: Id) -> Result<FetchLookup, Error> {
         let (sender, receiver) = chan::bounded(1);
         self.commands.send(service::Command::Fetch(id, sender))?;
         receiver.recv().map_err(Error::from)
     }
 
-    fn track_node(&mut self, id: NodeId, alias: Option<String>) -> Result<bool, Error> {
+    fn track(&mut self, id: Id) -> Result<bool, Error> {
         let (sender, receiver) = chan::bounded(1);
-        self.commands
-            .send(service::Command::TrackNode(id, alias, sender))?;
+        self.commands.send(service::Command::Track(id, sender))?;
         receiver.recv().map_err(Error::from)
     }
 
-    fn untrack_node(&mut self, id: NodeId) -> Result<bool, Error> {
+    fn untrack(&mut self, id: Id) -> Result<bool, Error> {
         let (sender, receiver) = chan::bounded(1);
-        self.commands
-            .send(service::Command::UntrackNode(id, sender))?;
-        receiver.recv().map_err(Error::from)
-    }
-
-    fn track_repo(&mut self, id: Id) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.commands
-            .send(service::Command::TrackRepo(id, sender))?;
-        receiver.recv().map_err(Error::from)
-    }
-
-    fn untrack_repo(&mut self, id: Id) -> Result<bool, Error> {
-        let (sender, receiver) = chan::bounded(1);
-        self.commands
-            .send(service::Command::UntrackRepo(id, sender))?;
+        self.commands.send(service::Command::Untrack(id, sender))?;
         receiver.recv().map_err(Error::from)
     }
 
     fn announce_refs(&mut self, id: Id) -> Result<(), Error> {
         self.command(service::Command::AnnounceRefs(id))
+    }
+
+    fn command(&self, cmd: service::Command) -> Result<(), Error> {
+        self.commands.send(cmd)?;
+        self.waker.wake()?;
+
+        Ok(())
     }
 
     fn routing(&self) -> Result<chan::Receiver<(Id, NodeId)>, Error> {
@@ -155,5 +133,33 @@ impl<W: Waker> radicle::node::Handle for Handle<W> {
         self.waker.wake()?;
 
         Ok(())
+    }
+}
+
+pub mod traits {
+    use super::*;
+
+    pub trait Handle {
+        /// Wait for the node's listening socket to be bound.
+        fn listening(&self) -> Result<net::SocketAddr, Error>;
+        /// Retrieve or update the project from network.
+        fn fetch(&mut self, id: Id) -> Result<FetchLookup, Error>;
+        /// Start tracking the given project. Doesn't do anything if the project is already
+        /// tracked.
+        fn track(&mut self, id: Id) -> Result<bool, Error>;
+        /// Untrack the given project and delete it from storage.
+        fn untrack(&mut self, id: Id) -> Result<bool, Error>;
+        /// Notify the client that a project has been updated.
+        fn announce_refs(&mut self, id: Id) -> Result<(), Error>;
+        /// Send a command to the command channel, and wake up the event loop.
+        fn command(&self, cmd: service::Command) -> Result<(), Error>;
+        /// Ask the client to shutdown.
+        fn shutdown(self) -> Result<(), Error>;
+        /// Query the routing table entries.
+        fn routing(&self) -> Result<chan::Receiver<(Id, NodeId)>, Error>;
+        /// Query the peer session state.
+        fn sessions(&self) -> Result<chan::Receiver<(NodeId, Session)>, Error>;
+        /// Query the inventory.
+        fn inventory(&self) -> Result<chan::Receiver<Id>, Error>;
     }
 }

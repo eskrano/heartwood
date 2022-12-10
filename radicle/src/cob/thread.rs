@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::ops::{ControlFlow, Deref, DerefMut};
 use std::str::FromStr;
@@ -14,12 +15,9 @@ use crate::cob::{ActorId, History, Op, OpId, TypeName};
 use crate::crypto::Signer;
 
 use crdt::clock::Lamport;
-use crdt::gmap::GMap;
 use crdt::lwwset::LWWSet;
 use crdt::redactable::Redactable;
 use crdt::Semilattice;
-
-use super::op::Ops;
 
 /// Type name of a thread.
 pub static TYPENAME: Lazy<TypeName> =
@@ -85,9 +83,9 @@ pub enum Action {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Thread {
     /// The comments under the thread.
-    comments: GMap<CommentId, Redactable<Comment>>,
+    comments: BTreeMap<CommentId, Redactable<Comment>>,
     /// Reactions to changes.
-    reactions: GMap<CommentId, LWWSet<(ActorId, Reaction), Lamport>>,
+    reactions: BTreeMap<CommentId, LWWSet<(ActorId, Reaction), Lamport>>,
 }
 
 impl store::FromHistory for Thread {
@@ -99,8 +97,8 @@ impl store::FromHistory for Thread {
 
     fn from_history(history: &History) -> Result<(Self, Lamport), store::Error> {
         let obj = history.traverse(Thread::default(), |mut acc, entry| {
-            if let Ok(Ops(changes)) = Ops::try_from(entry) {
-                acc.apply(changes);
+            if let Ok(change) = Op::try_from(entry) {
+                acc.apply([change]);
                 ControlFlow::Continue(acc)
             } else {
                 ControlFlow::Break(acc)
@@ -126,6 +124,10 @@ impl Deref for Thread {
 }
 
 impl Thread {
+    pub fn clear(&mut self) {
+        self.comments.clear();
+    }
+
     pub fn comment(&self, id: &CommentId) -> Option<&Comment> {
         if let Some(Redactable::Present(comment)) = self.comments.get(id) {
             Some(comment)
@@ -167,32 +169,53 @@ impl Thread {
             .map(|(a, r)| (a, r))
     }
 
-    pub fn apply(&mut self, ops: impl IntoIterator<Item = Op<Action>>) {
-        for op in ops.into_iter() {
-            let id = op.id();
+    pub fn apply(&mut self, changes: impl IntoIterator<Item = Op<Action>>) {
+        for change in changes.into_iter() {
+            let id = change.id();
 
-            match op.action {
+            match change.action {
                 Action::Comment { body, reply_to } => {
-                    let present = Redactable::Present(Comment::new(body, reply_to, op.timestamp));
-                    self.comments.insert(id, present);
+                    let present =
+                        Redactable::Present(Comment::new(body, reply_to, change.timestamp));
+
+                    match self.comments.entry(id) {
+                        Entry::Vacant(e) => {
+                            e.insert(present);
+                        }
+                        Entry::Occupied(mut e) => {
+                            e.get_mut().merge(present);
+                        }
+                    }
                 }
                 Action::Redact { id } => {
-                    self.comments.insert(id, Redactable::Redacted);
+                    self.comments
+                        .entry(id)
+                        .and_modify(|e| e.merge(Redactable::Redacted))
+                        .or_insert(Redactable::Redacted);
                 }
                 Action::React {
                     to,
                     reaction,
                     active,
                 } => {
-                    let key = (op.author, reaction);
-                    let reactions = if active {
-                        LWWSet::singleton(key, op.clock)
-                    } else {
-                        let mut set = LWWSet::default();
-                        set.remove(key, op.clock);
-                        set
-                    };
-                    self.reactions.insert(to, reactions);
+                    self.reactions
+                        .entry(to)
+                        .and_modify(|reactions| {
+                            if active {
+                                reactions.insert((change.author, reaction), change.clock);
+                            } else {
+                                reactions.remove((change.author, reaction), change.clock);
+                            }
+                        })
+                        .or_insert_with(|| {
+                            if active {
+                                LWWSet::singleton((change.author, reaction), change.clock)
+                            } else {
+                                let mut set = LWWSet::default();
+                                set.remove((change.author, reaction), change.clock);
+                                set
+                            }
+                        });
                 }
             }
         }

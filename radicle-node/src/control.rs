@@ -7,9 +7,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::{fs, io, net};
 
-use radicle::node::Handle;
-
 use crate::client;
+use crate::client::handle::traits::Handle;
 use crate::identity::Id;
 use crate::node;
 use crate::service::FetchLookup;
@@ -24,13 +23,7 @@ pub enum Error {
 }
 
 /// Listen for commands on the control socket, and process them.
-pub fn listen<
-    P: AsRef<Path>,
-    H: Handle<Error = client::handle::Error, FetchLookup = FetchLookup>,
->(
-    path: P,
-    mut handle: H,
-) -> Result<(), Error> {
+pub fn listen<P: AsRef<Path>, H: Handle>(path: P, mut handle: H) -> Result<(), Error> {
     // Remove the socket file on startup before rebinding.
     fs::remove_file(&path).ok();
     fs::create_dir_all(
@@ -76,10 +69,7 @@ enum DrainError {
     Io(#[from] io::Error),
 }
 
-fn drain<H: Handle<Error = client::handle::Error, FetchLookup = FetchLookup>>(
-    stream: &UnixStream,
-    handle: &mut H,
-) -> Result<(), DrainError> {
+fn drain<H: Handle>(stream: &UnixStream, handle: &mut H) -> Result<(), DrainError> {
     let mut reader = BufReader::new(stream);
     let mut writer = LineWriter::new(stream);
 
@@ -93,9 +83,9 @@ fn drain<H: Handle<Error = client::handle::Error, FetchLookup = FetchLookup>>(
                     return Err(DrainError::InvalidCommandArg(arg.to_owned()));
                 }
             }
-            Some(("track-repo", arg)) => {
+            Some(("track", arg)) => {
                 if let Ok(id) = arg.parse() {
-                    match handle.track_repo(id) {
+                    match handle.track(id) {
                         Ok(updated) => {
                             if updated {
                                 writeln!(writer, "{}", node::RESPONSE_OK)?;
@@ -111,50 +101,9 @@ fn drain<H: Handle<Error = client::handle::Error, FetchLookup = FetchLookup>>(
                     return Err(DrainError::InvalidCommandArg(arg.to_owned()));
                 }
             }
-            Some(("untrack-repo", arg)) => {
+            Some(("untrack", arg)) => {
                 if let Ok(id) = arg.parse() {
-                    match handle.untrack_repo(id) {
-                        Ok(updated) => {
-                            if updated {
-                                writeln!(writer, "{}", node::RESPONSE_OK)?;
-                            } else {
-                                writeln!(writer, "{}", node::RESPONSE_NOOP)?;
-                            }
-                        }
-                        Err(e) => {
-                            return Err(DrainError::Client(e));
-                        }
-                    }
-                } else {
-                    return Err(DrainError::InvalidCommandArg(arg.to_owned()));
-                }
-            }
-            Some(("track-node", args)) => {
-                let (peer, alias) = if let Some((peer, alias)) = args.split_once(' ') {
-                    (peer, Some(alias.to_owned()))
-                } else {
-                    (args, None)
-                };
-                if let Ok(id) = peer.parse() {
-                    match handle.track_node(id, alias) {
-                        Ok(updated) => {
-                            if updated {
-                                writeln!(writer, "{}", node::RESPONSE_OK)?;
-                            } else {
-                                writeln!(writer, "{}", node::RESPONSE_NOOP)?;
-                            }
-                        }
-                        Err(e) => {
-                            return Err(DrainError::Client(e));
-                        }
-                    }
-                } else {
-                    return Err(DrainError::InvalidCommandArg(args.to_owned()));
-                }
-            }
-            Some(("untrack-node", arg)) => {
-                if let Ok(id) = arg.parse() {
-                    match handle.untrack_node(id) {
+                    match handle.untrack(id) {
                         Ok(updated) => {
                             if updated {
                                 writeln!(writer, "{}", node::RESPONSE_OK)?;
@@ -208,11 +157,7 @@ fn drain<H: Handle<Error = client::handle::Error, FetchLookup = FetchLookup>>(
     Ok(())
 }
 
-fn fetch<W: Write, H: Handle<Error = client::handle::Error, FetchLookup = FetchLookup>>(
-    id: Id,
-    mut writer: W,
-    handle: &mut H,
-) -> Result<(), DrainError> {
+fn fetch<W: Write, H: Handle>(id: Id, mut writer: W, handle: &mut H) -> Result<(), DrainError> {
     match handle.fetch(id) {
         Err(e) => {
             return Err(DrainError::Client(e));
@@ -269,7 +214,7 @@ mod tests {
     use super::*;
     use crate::identity::Id;
     use crate::node::Handle;
-    use crate::node::{Node, NodeId};
+    use crate::node::Node;
     use crate::test;
 
     #[test]
@@ -310,7 +255,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let socket = tmp.path().join("node.sock");
         let proj = test::arbitrary::gen::<Id>(1);
-        let peer = test::arbitrary::gen::<NodeId>(1);
 
         thread::spawn({
             let socket = socket.clone();
@@ -319,24 +263,15 @@ mod tests {
             move || crate::control::listen(socket, handle)
         });
 
-        let mut handle = loop {
+        let handle = loop {
             if let Ok(conn) = Node::connect(&socket) {
                 break conn;
             }
         };
 
-        assert!(handle.track_repo(proj).unwrap());
-        assert!(!handle.track_repo(proj).unwrap());
-        assert!(handle.untrack_repo(proj).unwrap());
-        assert!(!handle.untrack_repo(proj).unwrap());
-
-        assert!(handle
-            .track_node(peer, Some(String::from("alice")))
-            .unwrap());
-        assert!(!handle
-            .track_node(peer, Some(String::from("alice")))
-            .unwrap());
-        assert!(handle.untrack_node(peer).unwrap());
-        assert!(!handle.untrack_node(peer).unwrap());
+        assert!(handle.track(&proj).unwrap());
+        assert!(!handle.track(&proj).unwrap());
+        assert!(handle.untrack(&proj).unwrap());
+        assert!(!handle.untrack(&proj).unwrap());
     }
 }

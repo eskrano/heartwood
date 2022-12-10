@@ -3,24 +3,19 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel as chan;
 
+use crate::client::handle::traits;
 use crate::client::handle::Error;
 use crate::identity::Id;
 use crate::service;
 use crate::service::FetchLookup;
-use crate::service::NodeId;
 
 #[derive(Default, Clone)]
 pub struct Handle {
     pub updates: Arc<Mutex<Vec<Id>>>,
-    pub tracking_repos: HashSet<Id>,
-    pub tracking_nodes: HashSet<NodeId>,
+    pub tracking: HashSet<Id>,
 }
 
-impl radicle::node::Handle for Handle {
-    type Error = Error;
-    type Session = service::Session;
-    type FetchLookup = FetchLookup;
-
+impl traits::Handle for Handle {
     fn listening(&self) -> Result<std::net::SocketAddr, Error> {
         unimplemented!()
     }
@@ -29,25 +24,21 @@ impl radicle::node::Handle for Handle {
         Ok(FetchLookup::NotFound)
     }
 
-    fn track_repo(&mut self, id: Id) -> Result<bool, Error> {
-        Ok(self.tracking_repos.insert(id))
+    fn track(&mut self, id: Id) -> Result<bool, Error> {
+        Ok(self.tracking.insert(id))
     }
 
-    fn untrack_repo(&mut self, id: Id) -> Result<bool, Error> {
-        Ok(self.tracking_repos.remove(&id))
-    }
-
-    fn track_node(&mut self, id: NodeId, _alias: Option<String>) -> Result<bool, Error> {
-        Ok(self.tracking_nodes.insert(id))
-    }
-
-    fn untrack_node(&mut self, id: NodeId) -> Result<bool, Error> {
-        Ok(self.tracking_nodes.remove(&id))
+    fn untrack(&mut self, id: Id) -> Result<bool, Error> {
+        Ok(self.tracking.remove(&id))
     }
 
     fn announce_refs(&mut self, id: Id) -> Result<(), Error> {
         self.updates.lock().unwrap().push(id);
 
+        Ok(())
+    }
+
+    fn command(&self, _cmd: service::Command) -> Result<(), Error> {
         Ok(())
     }
 

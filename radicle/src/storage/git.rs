@@ -500,7 +500,7 @@ impl ReadRepository for Repository {
 
         let mut heads = Vec::new();
         for delegate in project.delegates.iter() {
-            let r = self.reference_oid(delegate, &branch_ref)?.into();
+            let r = self.reference_oid(&delegate.id, &branch_ref)?.into();
 
             heads.push(r);
         }
@@ -964,16 +964,9 @@ mod tests {
 
         let alice_proj_storage = alice.repository(proj_id).unwrap();
         let alice_head = proj_repo.find_commit(alice_head).unwrap();
-        let alice_sig = git2::Signature::now("Alice", "alice@radicle.xyz").unwrap();
-        let alice_head = git::commit(
-            &proj_repo,
-            &alice_head,
-            &refname,
-            "Making changes",
-            &alice_sig,
-        )
-        .unwrap()
-        .id();
+        let alice_head = git::commit(&proj_repo, &alice_head, &refname, "Making changes", "Alice")
+            .unwrap()
+            .id();
         git::push(&proj_repo, "rad", [(&refname, &refname)]).unwrap();
         alice_proj_storage.sign_refs(&alice_signer).unwrap();
         alice_proj_storage.set_head().unwrap();
@@ -1147,7 +1140,7 @@ mod tests {
             &head,
             &git::RefString::try_from(format!("refs/remotes/{alice}/heads/master")).unwrap(),
             "Second commit",
-            &sig,
+            &alice.to_string(),
         )
         .unwrap();
 

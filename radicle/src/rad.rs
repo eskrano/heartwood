@@ -59,7 +59,11 @@ pub fn init<G: Signer>(
 ) -> Result<(Id, identity::Doc<Verified>, SignedRefs<Verified>), InitError> {
     // TODO: Better error when project id already exists in storage, but remote doesn't.
     let pk = signer.public_key();
-    let delegate = identity::Did::from(*pk);
+    let delegate = identity::Delegate {
+        // TODO: Use actual user name.
+        name: String::from("anonymous"),
+        id: identity::Did::from(*pk),
+    };
     let doc = identity::Doc::initial(
         name.to_owned(),
         description.to_owned(),
@@ -197,13 +201,10 @@ pub fn clone<P: AsRef<Path>, G: Signer, S: storage::WriteStorage, H: node::Handl
     path: P,
     signer: &G,
     storage: &S,
-    handle: &mut H,
-) -> Result<git2::Repository, CloneError>
-where
-    CloneError: From<H::Error>,
-{
-    let _ = handle.track_repo(proj)?;
-    let _ = handle.fetch(proj)?;
+    handle: &H,
+) -> Result<git2::Repository, CloneError> {
+    let _ = handle.track(&proj)?;
+    let _ = handle.fetch(&proj)?;
     let _ = fork(proj, signer, storage)?;
     let working = checkout(proj, signer.public_key(), path, storage)?;
 
@@ -346,8 +347,8 @@ mod tests {
 
     use radicle_crypto::test::signer::MockSigner;
 
-    use crate::git::{name::component, qualified};
-    use crate::identity::Did;
+    use crate::git::{name::component, qualified, Qualified};
+    use crate::identity::{Delegate, Did};
     use crate::storage::git::transport;
     use crate::storage::git::Storage;
     use crate::storage::{ReadStorage, WriteStorage};
@@ -402,7 +403,13 @@ mod tests {
         assert_eq!(project.name, "acme");
         assert_eq!(project.description, "Acme's repo");
         assert_eq!(project.default_branch, git::refname!("master"));
-        assert_eq!(project.delegates.first(), &Did::from(public_key));
+        assert_eq!(
+            project.delegates.first(),
+            &Delegate {
+                name: String::from("anonymous"),
+                id: Did::from(public_key),
+            }
+        );
     }
 
     #[test]

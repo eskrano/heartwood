@@ -80,12 +80,12 @@ pub fn run(options: Options, ctx: impl term::Context) -> anyhow::Result<()> {
 
 pub fn clone(id: Id, _interactive: Interactive, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
-    let mut node = radicle::node::connect(profile.node())?;
+    let node = radicle::node::connect(profile.node())?;
     let signer = term::signer(&profile)?;
 
     // Track & fetch project.
-    node.track_repo(id).context("track")?;
-    node.fetch(id).context("fetch")?;
+    node.track(&id).context("track")?;
+    node.fetch(&id).context("fetch")?;
 
     // Create a local fork of the project, under our own id.
     rad::fork(id, &signer, &profile.storage).context("fork")?;
@@ -101,7 +101,7 @@ pub fn clone(id: Id, _interactive: Interactive, ctx: impl term::Context) -> anyh
     let delegates = doc
         .delegates
         .iter()
-        .map(|d| **d)
+        .map(|d| *d.id)
         .filter(|id| id != profile.id())
         .collect::<Vec<_>>();
     let default_branch = doc.payload.default_branch.clone();

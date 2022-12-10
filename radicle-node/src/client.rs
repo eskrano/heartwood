@@ -1,14 +1,15 @@
 use std::{io, net};
 
 use crossbeam_channel as chan;
+use cyphernet::crypto::Ecdh;
 use nakamoto_net::{LocalTime, Reactor};
 use thiserror::Error;
 
 use radicle::crypto::Signer;
 
+use crate::clock::RefClock;
 use crate::profile::Profile;
-use crate::service::{routing, tracking};
-use crate::wire::transcode::NoHandshake;
+use crate::service::routing;
 use crate::wire::Wire;
 use crate::{address, service};
 
@@ -20,8 +21,6 @@ pub const NODE_DIR: &str = "node";
 pub const ROUTING_DB_FILE: &str = "routing.db";
 /// Filename of address database under [`NODE_DIR`].
 pub const ADDRESS_DB_FILE: &str = "addresses.db";
-/// Filename of tracking table database under [`NODE_DIR`].
-pub const TRACKING_DB_FILE: &str = "tracking.db";
 
 /// A client error.
 #[derive(Error, Debug)]
@@ -32,9 +31,6 @@ pub enum Error {
     /// An address database error.
     #[error("address database error: {0}")]
     Addresses(#[from] address::Error),
-    /// A tracking database error.
-    #[error("tracking database error: {0}")]
-    Tracking(#[from] tracking::Error),
     /// An I/O error.
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
@@ -102,7 +98,7 @@ impl<R: Reactor> Client<R> {
         })
     }
 
-    pub fn run<G: Signer>(
+    pub fn run<G: Signer + Ecdh + Clone>(
         mut self,
         config: Config,
         profile: Profile,
@@ -115,7 +111,6 @@ impl<R: Reactor> Client<R> {
         let node_dir = profile.home.join(NODE_DIR);
         let address_db = node_dir.join(ADDRESS_DB_FILE);
         let routing_db = node_dir.join(ROUTING_DB_FILE);
-        let tracking_db = node_dir.join(TRACKING_DB_FILE);
 
         log::info!("Opening address book {}..", address_db.display());
         let addresses = address::Book::open(address_db)?;
@@ -123,25 +118,21 @@ impl<R: Reactor> Client<R> {
         log::info!("Opening routing table {}..", routing_db.display());
         let routing = routing::Table::open(routing_db)?;
 
-        log::info!("Opening tracking policy table {}..", tracking_db.display());
-        let tracking = tracking::Config::open(tracking_db)?;
-
         log::info!("Initializing client ({:?})..", network);
 
         let service = service::Service::new(
             config.service,
-            time,
+            RefClock::from(time),
             routing,
             storage,
             addresses,
-            tracking,
             signer,
             rng,
         );
 
         self.reactor.run(
             &config.listen,
-            Wire::<_, _, _, _, NoHandshake>::new(service),
+            Wire::<_, _, _, _>::new(service),
             self.events,
             self.commands,
         )?;

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use axum::handler::Handler;
 use axum::http::{header, HeaderValue};
@@ -11,10 +11,8 @@ use serde_json::json;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use radicle::cob::issue::Issues;
-use radicle::cob::thread::{self, CommentId};
-use radicle::cob::Timestamp;
 use radicle::git::raw::BranchType;
-use radicle::identity::{Doc, Id, PublicKey};
+use radicle::identity::{Doc, Id};
 use radicle::node::NodeId;
 use radicle::storage::{Oid, ReadRepository, WriteRepository, WriteStorage};
 use radicle_surf::git::History;
@@ -332,11 +330,11 @@ async fn issues_handler(
         .filter_map(|r| r.ok())
         .map(|(id, issue, _)| {
             json!({
-                "id": id.to_string(),
+                "id": id,
                 "author": issue.author(),
                 "title": issue.title(),
-                "state": issue.state(),
-                "discussion": issue.comments().collect::<Comments>(),
+                "status": issue.status(),
+                "discussion": issue.comments().collect::<Vec<_>>(),
                 "tags": issue.tags().collect::<Vec<_>>(),
             })
         })
@@ -362,48 +360,12 @@ async fn issue_handler(
         "id": issue_id,
         "author": issue.author(),
         "title": issue.title(),
-        "state": issue.state(),
-        "discussion": issue.comments().collect::<Comments>(),
+        "status": issue.status(),
+        "discussion": issue.comments().collect::<Vec<_>>(),
         "tags": issue.tags().collect::<Vec<_>>(),
     });
 
     Ok::<_, Error>(Json(issue))
-}
-
-#[derive(Serialize)]
-struct Author {
-    id: PublicKey,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Comment {
-    author: Author,
-    body: String,
-    reactions: [String; 0],
-    timestamp: Timestamp,
-    reply_to: Option<CommentId>,
-}
-
-#[derive(Serialize)]
-struct Comments(Vec<Comment>);
-
-impl<'a> FromIterator<(&'a CommentId, &'a thread::Comment)> for Comments {
-    fn from_iter<I: IntoIterator<Item = (&'a CommentId, &'a thread::Comment)>>(iter: I) -> Self {
-        let mut comments = Vec::new();
-
-        for (comment_id, comment) in iter {
-            comments.push(Comment {
-                author: Author { id: comment_id.1 },
-                body: comment.body.to_owned(),
-                reactions: [],
-                timestamp: comment.timestamp,
-                reply_to: comment.reply_to,
-            });
-        }
-
-        Comments(comments)
-    }
 }
 
 #[derive(Serialize)]
@@ -426,7 +388,7 @@ fn stats<R: WriteRepository>(repo: &R) -> Result<Stats, Error> {
                 None
             }
         })
-        .collect::<HashSet<_>>();
+        .collect::<BTreeSet<_>>();
 
     Ok(Stats {
         branches,

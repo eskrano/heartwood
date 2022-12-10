@@ -24,9 +24,6 @@ pub struct Verified;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Unverified;
 
-/// Output of a Diffie-Hellman key exchange.
-pub type SharedSecret = [u8; 32];
-
 /// Error returned if signing fails, eg. due to an HSM or KMS.
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -68,13 +65,6 @@ where
     fn try_sign(&self, msg: &[u8]) -> Result<Signature, SignerError> {
         self.deref().try_sign(msg)
     }
-}
-
-/// A signer that can perform Elliptic-curve Diffie–Hellman.
-pub trait Ecdh: Signer {
-    /// Perform an ECDH key exchange. Takes the counter-party's public key,
-    /// and returns a computed shared secret.
-    fn ecdh(&self, other: &PublicKey) -> Result<SharedSecret, Error>;
 }
 
 /// Cryptographic signature.
@@ -354,43 +344,32 @@ impl<'a> From<&PublicKey> for git_ref_format::Component<'a> {
         use git_ref_format::{Component, RefString};
         let refstr =
             RefString::try_from(id.to_string()).expect("encoded public keys are valid ref strings");
-        Component::from_refstr(refstr).expect("encoded public keys are valid refname components")
+        Component::from_refstring(refstr).expect("encoded public keys are valid refname components")
     }
 }
 
 #[cfg(feature = "sqlite")]
-impl From<&PublicKey> for sqlite::Value {
-    fn from(pk: &PublicKey) -> Self {
-        sqlite::Value::String(pk.to_human())
-    }
-}
-
-#[cfg(feature = "sqlite")]
-impl TryFrom<&sqlite::Value> for PublicKey {
-    type Error = sqlite::Error;
-
-    fn try_from(value: &sqlite::Value) -> Result<Self, Self::Error> {
+impl sqlite::ValueInto for PublicKey {
+    fn into(value: &sqlite::Value) -> Option<Self> {
+        use sqlite::Value;
         match value {
-            sqlite::Value::String(s) => Self::from_str(s).map_err(|e| sqlite::Error {
-                code: None,
-                message: Some(e.to_string()),
-            }),
-            _ => Err(sqlite::Error {
-                code: None,
-                message: Some("sql: invalid type for public key".to_owned()),
-            }),
+            Value::String(id) => PublicKey::from_str(id).ok(),
+            _ => None,
         }
     }
 }
 
 #[cfg(feature = "sqlite")]
-impl sqlite::BindableWithIndex for &PublicKey {
-    fn bind<I: sqlite::ParameterIndex>(
-        self,
-        stmt: &mut sqlite::Statement<'_>,
-        i: I,
-    ) -> sqlite::Result<()> {
-        sqlite::Value::from(self).bind(stmt, i)
+impl From<PublicKey> for sqlite::Value {
+    fn from(pk: PublicKey) -> Self {
+        sqlite::Value::String(pk.to_human())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl sqlite::Bindable for &PublicKey {
+    fn bind(self, stmt: &mut sqlite::Statement<'_>, i: usize) -> sqlite::Result<()> {
+        sqlite::Value::from(*self).bind(stmt, i)
     }
 }
 

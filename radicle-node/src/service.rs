@@ -1,11 +1,9 @@
-#![allow(clippy::too_many_arguments)]
 pub mod config;
 pub mod filter;
 pub mod message;
 pub mod reactor;
 pub mod routing;
 pub mod session;
-pub mod tracking;
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -14,6 +12,7 @@ use std::sync::Arc;
 use std::{fmt, net, str};
 
 use crossbeam_channel as chan;
+use cyphernet::addr::{NetAddr, PeerAddr};
 use fastrand::Rng;
 use log::*;
 use nakamoto::{LocalDuration, LocalTime};
@@ -25,13 +24,14 @@ use radicle::storage::{Namespaces, ReadStorage};
 
 use crate::address;
 use crate::address::AddressBook;
-use crate::clock::Timestamp;
+use crate::clock::{RefClock, Timestamp};
 use crate::crypto;
 use crate::crypto::{Signer, Verified};
 use crate::git;
 use crate::identity::{Doc, Id};
 use crate::node;
 use crate::prelude::*;
+use crate::service::config::ProjectTracking;
 use crate::service::message::{Address, Announcement, AnnouncementMessage, Ping};
 use crate::service::message::{NodeAnnouncement, RefsAnnouncement};
 use crate::storage;
@@ -73,8 +73,9 @@ pub const MAX_CONNECTION_ATTEMPTS: usize = 3;
 pub use message::ADDRESS_LIMIT;
 /// Maximum inventory limit imposed by message size limits.
 pub use message::INVENTORY_LIMIT;
-/// Maximum number of project git references imposed by message size limits.
-pub use message::REF_LIMIT;
+
+/// A pair of peer address and peer node id.
+pub type NodeAddr = PeerAddr<NodeId, NetAddr<DEFAULT_PORT>>;
 
 /// A service event.
 #[derive(Debug, Clone)]
@@ -113,7 +114,7 @@ pub enum FetchError {
 pub enum FetchLookup {
     /// Found seeds for the given project.
     Found {
-        seeds: NonEmpty<net::SocketAddr>,
+        seeds: NonEmpty<NodeId>,
         results: chan::Receiver<FetchResult>,
     },
     /// Can't fetch because no seeds were found for this project.
@@ -130,14 +131,11 @@ pub enum FetchLookup {
 pub enum FetchResult {
     /// Successful fetch from a seed.
     Fetched {
-        from: net::SocketAddr,
+        from: NodeId,
         updated: Vec<RefUpdate>,
     },
     /// Error fetching the resource from a seed.
-    Error {
-        from: net::SocketAddr,
-        error: FetchError,
-    },
+    Error { from: NodeId, error: FetchError },
 }
 
 /// Function used to query internal service state.
@@ -148,17 +146,13 @@ pub enum Command {
     /// Announce repository references for given project id to peers.
     AnnounceRefs(Id),
     /// Connect to node with the given address.
-    Connect(net::SocketAddr),
+    Connect(NodeId, Address),
     /// Fetch the given project from the network.
     Fetch(Id, chan::Sender<FetchLookup>),
     /// Track the given project.
-    TrackRepo(Id, chan::Sender<bool>),
+    Track(Id, chan::Sender<bool>),
     /// Untrack the given project.
-    UntrackRepo(Id, chan::Sender<bool>),
-    /// Track the given node.
-    TrackNode(NodeId, Option<String>, chan::Sender<bool>),
-    /// Untrack the given node.
-    UntrackNode(NodeId, chan::Sender<bool>),
+    Untrack(Id, chan::Sender<bool>),
     /// Query the internal service state.
     QueryState(Arc<QueryState>, chan::Sender<Result<(), CommandError>>),
 }
@@ -167,12 +161,10 @@ impl fmt::Debug for Command {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AnnounceRefs(id) => write!(f, "AnnounceRefs({})", id),
-            Self::Connect(addr) => write!(f, "Connect({})", addr),
+            Self::Connect(id, addr) => write!(f, "Connect({}, {})", id, addr),
             Self::Fetch(id, _) => write!(f, "Fetch({})", id),
-            Self::TrackRepo(id, _) => write!(f, "TrackRepo({})", id),
-            Self::UntrackRepo(id, _) => write!(f, "UntrackRepo({})", id),
-            Self::TrackNode(id, _, _) => write!(f, "TrackNode({})", id),
-            Self::UntrackNode(id, _) => write!(f, "UntrackNode({})", id),
+            Self::Track(id, _) => write!(f, "Track({})", id),
+            Self::Untrack(id, _) => write!(f, "Untrack({})", id),
             Self::QueryState { .. } => write!(f, "QueryState(..)"),
         }
     }
@@ -199,8 +191,6 @@ pub struct Service<R, A, S, G> {
     routing: R,
     /// Node address manager.
     addresses: A,
-    /// Tracking policy configuration.
-    tracking: tracking::Config,
     /// State relating to gossip.
     gossip: Gossip,
     /// Peer sessions, currently or recently connected.
@@ -208,15 +198,13 @@ pub struct Service<R, A, S, G> {
     /// Keeps track of node states.
     nodes: BTreeMap<NodeId, Node>,
     /// Clock. Tells the time.
-    clock: LocalTime,
+    clock: RefClock,
     /// Interface to the I/O reactor.
     reactor: Reactor,
     /// Source of entropy.
     rng: Rng,
     /// Whether our local inventory no long represents what we have announced to the network.
     out_of_sync: bool,
-    /// Current tracked repository bloom filter.
-    filter: Filter,
     /// Last time the service was idle.
     last_idle: LocalTime,
     /// Last time the service synced.
@@ -240,7 +228,7 @@ where
 
     /// Get the local service time.
     pub fn local_time(&self) -> LocalTime {
-        self.clock
+        self.clock.local_time()
     }
 }
 
@@ -253,11 +241,10 @@ where
 {
     pub fn new(
         config: Config,
-        clock: LocalTime,
+        clock: RefClock,
         routing: R,
         storage: S,
         addresses: A,
-        tracking: tracking::Config,
         signer: G,
         rng: Rng,
     ) -> Self {
@@ -267,7 +254,6 @@ where
             config,
             storage,
             addresses,
-            tracking,
             signer,
             rng,
             clock,
@@ -278,7 +264,6 @@ where
             reactor: Reactor::default(),
             sessions,
             out_of_sync: false,
-            filter: Filter::empty(),
             last_idle: LocalTime::default(),
             last_sync: LocalTime::default(),
             last_prune: LocalTime::default(),
@@ -298,30 +283,34 @@ where
         }
     }
 
-    /// Track a repository.
-    /// Returns whether or not the tracking policy was updated.
-    pub fn track_repo(&mut self, id: &Id, scope: tracking::Scope) -> Result<bool, tracking::Error> {
-        self.out_of_sync = self.tracking.track_repo(id, scope)?;
-        self.filter.insert(id);
+    pub fn tracked(&self) -> Result<Vec<Id>, storage::Error> {
+        let tracked = match &self.config.project_tracking {
+            ProjectTracking::All { blocked } => self
+                .storage
+                .inventory()?
+                .into_iter()
+                .filter(|id| !blocked.contains(id))
+                .collect(),
 
-        Ok(self.out_of_sync)
+            ProjectTracking::Allowed(projs) => projs.iter().cloned().collect(),
+        };
+
+        Ok(tracked)
     }
 
-    /// Untrack a repository.
+    /// Track a project.
+    /// Returns whether or not the tracking policy was updated.
+    pub fn track(&mut self, id: Id) -> bool {
+        self.out_of_sync = self.config.track(id);
+        self.out_of_sync
+    }
+
+    /// Untrack a project.
     /// Returns whether or not the tracking policy was updated.
     /// Note that when untracking, we don't announce anything to the network. This is because by
     /// simply not announcing it anymore, it will eventually be pruned by nodes.
-    pub fn untrack_repo(&mut self, id: &Id) -> Result<bool, tracking::Error> {
-        // Nb. This is potentially slow if we have lots of projects. We should probably
-        // only re-compute the filter when we've untracked a certain amount of projects
-        // and the filter is really out of date.
-        self.filter = Filter::new(self.tracking.repo_entries()?.map(|(e, _)| e));
-        self.tracking.untrack_repo(id)
-    }
-
-    /// Check whether we are tracking a certain repository.
-    pub fn is_tracking(&self, id: &Id) -> Result<bool, tracking::Error> {
-        self.tracking.is_repo_tracked(id)
+    pub fn untrack(&mut self, id: Id) -> bool {
+        self.config.untrack(id)
     }
 
     /// Find the closest `n` peers by proximity in tracking graphs.
@@ -352,11 +341,6 @@ where
         &mut self.storage
     }
 
-    /// Get the tracking policy.
-    pub fn tracking(&self) -> &tracking::Config {
-        &self.tracking
-    }
-
     /// Get the local signer.
     pub fn signer(&self) -> &G {
         &self.signer
@@ -384,19 +368,19 @@ where
 
         // Connect to configured peers.
         let addrs = self.config.connect.clone();
-        for addr in addrs {
-            self.reactor.connect(addr);
+        for (id, addr) in addrs {
+            self.reactor.connect(id, addr);
         }
     }
 
     pub fn tick(&mut self, now: nakamoto::LocalTime) {
         trace!("Tick +{}", now - self.start_time);
 
-        self.clock = now;
+        self.clock.set(now);
     }
 
     pub fn wake(&mut self) {
-        let now = self.clock;
+        let now = self.clock.local_time();
 
         trace!("Wake +{}", now - self.start_time);
 
@@ -440,13 +424,9 @@ where
         debug!("Command {:?}", cmd);
 
         match cmd {
-            Command::Connect(addr) => self.reactor.connect(addr),
+            Command::Connect(id, addr) => self.reactor.connect(id, addr),
             Command::Fetch(id, resp) => {
-                if !self
-                    .tracking
-                    .is_repo_tracked(&id)
-                    .expect("Service::command: error accessing tracking configuration")
-                {
+                if !self.config.is_tracking(&id) {
                     resp.send(FetchLookup::NotTracking).ok();
                     return;
                 }
@@ -472,7 +452,7 @@ where
 
                 let (results_, results) = chan::bounded(seeds.len());
                 resp.send(FetchLookup::Found {
-                    seeds: seeds.clone().map(|(_, peer)| peer.addr),
+                    seeds: seeds.clone().map(|(_, peer)| peer.id),
                     results,
                 })
                 .ok();
@@ -483,7 +463,7 @@ where
                         Ok(updated) => {
                             results_
                                 .send(FetchResult::Fetched {
-                                    from: peer.addr,
+                                    from: peer.id,
                                     updated,
                                 })
                                 .ok();
@@ -491,7 +471,7 @@ where
                         Err(err) => {
                             results_
                                 .send(FetchResult::Error {
-                                    from: peer.addr,
+                                    from: peer.id,
                                     error: err.into(),
                                 })
                                 .ok();
@@ -499,31 +479,11 @@ where
                     }
                 }
             }
-            Command::TrackRepo(id, resp) => {
-                let tracked = self
-                    .track_repo(&id, tracking::Scope::All)
-                    .expect("Service::command: error tracking repository");
-                resp.send(tracked).ok();
+            Command::Track(id, resp) => {
+                resp.send(self.track(id)).ok();
             }
-            Command::UntrackRepo(id, resp) => {
-                let untracked = self
-                    .untrack_repo(&id)
-                    .expect("Service::command: error untracking repository");
-                resp.send(untracked).ok();
-            }
-            Command::TrackNode(id, alias, resp) => {
-                let tracked = self
-                    .tracking
-                    .track_node(&id, alias.as_deref())
-                    .expect("Service::command: error tracking node");
-                resp.send(tracked).ok();
-            }
-            Command::UntrackNode(id, resp) => {
-                let untracked = self
-                    .tracking
-                    .untrack_node(&id)
-                    .expect("Service::command: error untracking node");
-                resp.send(untracked).ok();
+            Command::Untrack(id, resp) => {
+                resp.send(self.untrack(id)).ok();
             }
             Command::AnnounceRefs(id) => {
                 if let Err(err) = self.announce_refs(id) {
@@ -536,43 +496,33 @@ where
         }
     }
 
-    pub fn attempted(&mut self, addr: &net::SocketAddr) {
-        let address = Address::from(*addr);
-        let persistent = self.config.is_persistent(&address);
-        let peer = self
-            .sessions
-            .entry(*addr)
-            .or_insert_with(|| Session::new(*addr, Link::Outbound, persistent, self.rng.clone()));
+    // TODO: Use `Address` here
+    pub fn attempted(&mut self, _addr: &net::SocketAddr) {
+        // let address = Address::from(*addr);
+        // let persistent = self.config.is_persistent(&address);
+        // let peer = self
+        //     .sessions
+        //     .entry(*addr)
+        //     .or_insert_with(|| Session::new(*addr, Link::Outbound, persistent, self.rng.clone()));
 
-        peer.attempted();
+        // peer.attempted();
     }
 
-    pub fn connecting(
-        &mut self,
-        _addr: net::SocketAddr,
-        _local_addr: &net::SocketAddr,
-        _link: Link,
-    ) {
-    }
-
-    pub fn connected(&mut self, addr: net::SocketAddr, link: Link) {
-        let address = addr.into();
-
-        debug!("Connected to {} ({:?})", addr, link);
+    pub fn connected(&mut self, id: NodeId, link: Link) {
+        debug!("Connected to {} ({:?})", id, link);
 
         // For outbound connections, we are the first to say "Hello".
         // For inbound connections, we wait for the remote to say "Hello" first.
         // TODO: How should we deal with multiple peers connecting from the same IP address?
         if link.is_outbound() {
-            if let Some(peer) = self.sessions.get_mut(&addr) {
+            if let Some(peer) = self.sessions.get_mut(&id) {
                 if link.is_outbound() {
                     self.reactor.write_all(
-                        addr,
+                        id,
                         gossip::handshake(
-                            self.clock.as_secs(),
+                            self.clock.timestamp(),
                             &self.storage,
                             &self.signer,
-                            self.filter.clone(),
                             &self.config,
                         ),
                     );
@@ -581,68 +531,70 @@ where
             }
         } else {
             self.sessions.insert(
-                addr,
+                id,
                 Session::new(
-                    addr,
+                    id,
                     Link::Inbound,
-                    self.config.is_persistent(&address),
+                    self.config.is_persistent(&id),
                     self.rng.clone(),
                 ),
             );
         }
     }
 
+    // TODO: Pass NodeId and reason by value
     pub fn disconnected(
         &mut self,
-        addr: &net::SocketAddr,
+        id: &NodeId,
         reason: &nakamoto::DisconnectReason<DisconnectReason>,
     ) {
         let since = self.local_time();
-        let address = Address::from(*addr);
 
-        debug!("Disconnected from {} ({})", addr, reason);
+        debug!("Disconnected from {} ({})", id, reason);
 
-        if let Some(session) = self.sessions.get_mut(addr) {
+        if let Some(session) = self.sessions.get_mut(id) {
             session.state = session::State::Disconnected { since };
 
             // Attempt to re-connect to persistent peers.
-            if self.config.is_persistent(&address) && session.attempts() < MAX_CONNECTION_ATTEMPTS {
-                if reason.is_dial_err() {
-                    return;
-                }
-                if let nakamoto::DisconnectReason::Protocol(r) = reason {
-                    if !r.is_transient() {
+            if let Some(address) = self.config.connect.get(id) {
+                if session.attempts() < MAX_CONNECTION_ATTEMPTS {
+                    if reason.is_dial_err() {
                         return;
                     }
+                    if let nakamoto::DisconnectReason::Protocol(r) = reason {
+                        if !r.is_transient() {
+                            return;
+                        }
+                    }
+                    // TODO: Eventually we want a delay before attempting a reconnection,
+                    // with exponential back-off.
+                    debug!(
+                        "Reconnecting to {} (attempts={})...",
+                        id,
+                        session.attempts()
+                    );
+
+                    // TODO: Try to reconnect only if the peer was attempted. A disconnect without
+                    // even a successful attempt means that we're unlikely to be able to reconnect.
+
+                    self.reactor.connect(*id, address.clone());
                 }
-                // TODO: Eventually we want a delay before attempting a reconnection,
-                // with exponential back-off.
-                debug!(
-                    "Reconnecting to {} (attempts={})...",
-                    addr,
-                    session.attempts()
-                );
-
-                // TODO: Try to reconnect only if the peer was attempted. A disconnect without
-                // even a successful attempt means that we're unlikely to be able to reconnect.
-
-                self.reactor.connect(*addr);
             } else {
-                self.sessions.remove(addr);
+                self.sessions.remove(id);
                 self.maintain_connections();
             }
         }
     }
 
-    pub fn received_message(&mut self, addr: &net::SocketAddr, message: Message) {
-        match self.handle_message(addr, message) {
-            Err(session::Error::NotFound(ip)) => {
-                error!("Session not found for {ip}");
+    pub fn received_message(&mut self, id: NodeId, message: Message) {
+        match self.handle_message(&id, message) {
+            Err(session::Error::NotFound(id)) => {
+                error!("Session not found for {id}");
             }
             Err(err) => {
                 // If there's an error, stop processing messages from this peer.
                 // However, we still relay messages returned up to this point.
-                self.reactor.disconnect(*addr, DisconnectReason::Error(err));
+                self.reactor.disconnect(id, DisconnectReason::Error(err));
 
                 // FIXME: The peer should be set in a state such that we don'that
                 // process further messages.
@@ -668,7 +620,7 @@ where
             message,
             ..
         } = announcement;
-        let now = self.clock;
+        let now = self.clock.local_time();
         let timestamp = message.timestamp();
         let relay = self.config.relay;
         let peer = self.nodes.entry(*announcer).or_insert_with(Node::default);
@@ -710,11 +662,7 @@ where
             AnnouncementMessage::Refs(message) => {
                 // TODO: Buffer/throttle fetches.
                 // TODO: Check that we're tracking this user as well.
-                if self
-                    .tracking
-                    .is_repo_tracked(&message.id)
-                    .expect("Service::handle_announcement: error accessing tracking configuration")
-                {
+                if self.config.is_tracking(&message.id) {
                     // Discard inventory messages we've already seen, otherwise update
                     // out last seen time.
                     if !peer.refs_announced(message.id, timestamp) {
@@ -751,11 +699,6 @@ where
                     if is_updated {
                         return Ok(relay);
                     }
-                } else {
-                    log::debug!(
-                        "Ignoring refs announcement from {announcer}: repository {} isn't tracked",
-                        message.id
-                    );
                 }
             }
             AnnouncementMessage::Node(
@@ -822,15 +765,15 @@ where
 
     pub fn handle_message(
         &mut self,
-        remote: &net::SocketAddr,
+        remote: &NodeId,
         message: Message,
     ) -> Result<(), session::Error> {
         let Some(peer) = self.sessions.get_mut(remote) else {
             return Err(session::Error::NotFound(*remote));
         };
-        peer.last_active = self.clock;
+        peer.last_active = self.clock.local_time();
 
-        debug!("Received {:?} from {}", &message, peer.ip());
+        debug!("Received {:?} from {}", &message, peer.id);
 
         match (&mut peer.state, message) {
             (session::State::Initial, Message::Initialize { id, version, addrs }) => {
@@ -841,12 +784,11 @@ where
                 // extra "acknowledgment" message sent when the `Initialize` is well received.
                 if peer.link.is_inbound() {
                     self.reactor.write_all(
-                        peer.addr,
+                        peer.id,
                         gossip::handshake(
-                            self.clock.as_secs(),
+                            self.clock.timestamp(),
                             &self.storage,
                             &self.signer,
-                            self.filter.clone(),
                             &self.config,
                         ),
                     );
@@ -856,7 +798,7 @@ where
                 // mean that messages received right after the handshake could be ignored.
                 peer.state = session::State::Negotiated {
                     id,
-                    since: self.clock,
+                    since: self.clock.local_time(),
                     addrs: addrs.unbound(),
                     ping: Default::default(),
                 };
@@ -864,7 +806,7 @@ where
             (session::State::Initial, _) => {
                 debug!(
                     "Disconnecting peer {} for sending us a message before handshake",
-                    peer.ip()
+                    peer.id
                 );
                 return Err(session::Error::Misbehavior);
             }
@@ -882,10 +824,9 @@ where
                     let relay_to = self
                         .sessions
                         .negotiated()
-                        .filter(|(addr, _, _)| *addr != remote)
-                        .filter(|(_, id, _)| **id != ann.node);
+                        .filter(|(id, _)| *id != remote && *id != &ann.node);
 
-                    self.reactor.relay(ann.clone(), relay_to.map(|(_, _, p)| p));
+                    self.reactor.relay(ann.clone(), relay_to.map(|(_, p)| p));
 
                     return Ok(());
                 }
@@ -895,14 +836,14 @@ where
                     .gossip
                     .filtered(&subscribe.filter, subscribe.since, subscribe.until)
                 {
-                    self.reactor.write(peer.addr, msg);
+                    self.reactor.write(peer.id, msg);
                 }
                 peer.subscribe = Some(subscribe);
             }
             (session::State::Negotiated { .. }, Message::Initialize { .. }) => {
                 debug!(
                     "Disconnecting peer {} for sending us a redundant handshake message",
-                    peer.ip()
+                    peer.id
                 );
                 return Err(session::Error::Misbehavior);
             }
@@ -912,7 +853,7 @@ where
                     return Ok(());
                 }
                 self.reactor.write(
-                    peer.addr,
+                    peer.id,
                     Message::Pong {
                         zeroes: ZeroBytes::new(ponglen),
                     },
@@ -926,7 +867,7 @@ where
                 }
             }
             (session::State::Disconnected { .. }, msg) => {
-                debug!("Ignoring {:?} from disconnected peer {}", msg, peer.ip());
+                debug!("Ignoring {:?} from disconnected peer {}", msg, peer.id);
             }
         }
         Ok(())
@@ -942,11 +883,7 @@ where
         let mut included = HashSet::new();
         for proj_id in inventory {
             included.insert(proj_id);
-            if self.routing.insert(*proj_id, from, *timestamp)?
-                && self
-                    .tracking
-                    .is_repo_tracked(proj_id)
-                    .expect("Service::process_inventory: error accessing tracking configuration")
+            if self.routing.insert(*proj_id, from, *timestamp)? && self.config.is_tracking(proj_id)
             {
                 log::info!("Routing table updated for {} with seed {}", proj_id, from);
             }
@@ -961,22 +898,12 @@ where
 
     /// Announce local refs for given id.
     fn announce_refs(&mut self, id: Id) -> Result<(), storage::Error> {
-        type Refs = BoundedVec<Id, REF_LIMIT>;
-
         let node = self.node_id();
         let repo = self.storage.repository(id)?;
         let remote = repo.remote(&node)?;
-        let peers = self.sessions.negotiated().map(|(_, _, p)| p);
-        let timestamp = self.clock.as_secs();
-
-        if remote.refs.len() > Refs::max() {
-            log::error!(
-                "refs announcement limit ({}) exceeded, other nodes will see only some of your project references",
-                Refs::max(),
-            );
-        }
-        let refs = BoundedVec::collect_from(&mut remote.refs.iter().map(|(a, b)| (a.clone(), *b)));
-
+        let peers = self.sessions.negotiated().map(|(_, p)| p);
+        let refs = remote.refs.into();
+        let timestamp = self.clock.timestamp();
         let msg = AnnouncementMessage::from(RefsAnnouncement {
             id,
             refs,
@@ -997,12 +924,12 @@ where
     fn announce_inventory(&mut self) -> Result<(), storage::Error> {
         let inventory = self.storage().inventory()?;
         let inv = Message::inventory(
-            gossip::inventory(self.clock.as_secs(), inventory),
+            gossip::inventory(self.clock.timestamp(), inventory),
             &self.signer,
         );
 
-        for addr in self.sessions.negotiated().map(|(_, _, p)| p.addr) {
-            self.reactor.write(addr, inv.clone());
+        for id in self.sessions.negotiated().map(|(id, _)| id) {
+            self.reactor.write(*id, inv.clone());
         }
         Ok(())
     }
@@ -1025,12 +952,11 @@ where
         let stale = self
             .sessions
             .negotiated()
-            .filter(|(_, _, session)| session.last_active < *now - STALE_CONNECTION_TIMEOUT);
-        for (_, _, session) in stale {
-            self.reactor.disconnect(
-                session.addr,
-                DisconnectReason::Error(session::Error::Timeout),
-            );
+            .filter(|(_, session)| session.last_active < *now - STALE_CONNECTION_TIMEOUT);
+
+        for (_, session) in stale {
+            self.reactor
+                .disconnect(session.id, DisconnectReason::Error(session::Error::Timeout));
         }
     }
 
@@ -1046,16 +972,18 @@ where
         }
     }
 
-    fn choose_addresses(&mut self) -> Vec<Address> {
-        let mut initializing: Vec<Address> = Vec::new();
+    fn choose_addresses(&mut self) -> Vec<(NodeId, Address)> {
+        // TODO(noise): Remove once noise is implemented.
+        let mut initializing: Vec<NodeId> = Vec::new();
         let mut negotiated: HashMap<NodeId, &Session> = HashMap::new();
         for s in self.sessions.values() {
             if !s.link.is_outbound() {
                 continue;
             }
             match s.state {
+                // FIXME: Remove when we have noise handshake.
                 session::State::Initial => {
-                    initializing.push(s.addr.into());
+                    initializing.push(s.id);
                 }
                 session::State::Negotiated { id, .. } => {
                     negotiated.insert(id, s);
@@ -1074,11 +1002,11 @@ where
         self.addresses
             .entries()
             .unwrap()
-            .filter(|(node_id, s)| {
-                !initializing.contains(&s.addr) && !negotiated.contains_key(node_id)
+            .filter(|(node_id, _)| {
+                !initializing.contains(node_id) && !negotiated.contains_key(node_id)
             })
             .take(wanted)
-            .map(|(_, s)| s.addr)
+            .map(|(n, s)| (n, s.addr))
             .collect()
     }
 
@@ -1087,8 +1015,8 @@ where
         if addrs.is_empty() {
             debug!("No eligible peers available to connect to");
         }
-        for addr in addrs {
-            self.reactor.connect(addr.clone());
+        for (id, addr) in addrs {
+            self.reactor.connect(id, addr.clone());
         }
     }
 }
@@ -1102,9 +1030,7 @@ pub trait ServiceState {
     /// Get a project from storage, using the local node's key.
     fn get(&self, proj: Id) -> Result<Option<Doc<Verified>>, storage::ProjectError>;
     /// Get the clock.
-    fn clock(&self) -> &LocalTime;
-    /// Get the clock mutably.
-    fn clock_mut(&mut self) -> &mut LocalTime;
+    fn clock(&self) -> &RefClock;
     /// Get service configuration.
     fn config(&self) -> &Config;
     /// Get reference to routing table.
@@ -1129,12 +1055,8 @@ where
         self.storage.get(&self.node_id(), proj)
     }
 
-    fn clock(&self) -> &LocalTime {
+    fn clock(&self) -> &RefClock {
         &self.clock
-    }
-
-    fn clock_mut(&mut self) -> &mut LocalTime {
-        &mut self.clock
     }
 
     fn config(&self) -> &Config {
@@ -1149,6 +1071,8 @@ where
 #[derive(Debug)]
 pub enum DisconnectReason {
     User,
+    Peer,
+    RepeatedConnection,
     Error(session::Error),
 }
 
@@ -1156,6 +1080,7 @@ impl DisconnectReason {
     fn is_transient(&self) -> bool {
         match self {
             Self::User => false,
+            Self::Peer => false,
             Self::Error(..) => false,
         }
     }
@@ -1258,7 +1183,7 @@ impl Node {
 
 #[derive(Debug)]
 /// Holds currently (or recently) connected peers.
-pub struct Sessions(AddressBook<net::SocketAddr, Session>);
+pub struct Sessions(AddressBook<NodeId, Session>);
 
 impl Sessions {
     pub fn new(rng: Rng) -> Self {
@@ -1270,25 +1195,23 @@ impl Sessions {
     }
 
     /// Iterator over fully negotiated peers.
-    pub fn negotiated(
-        &self,
-    ) -> impl Iterator<Item = (&net::SocketAddr, &NodeId, &Session)> + Clone {
+    pub fn negotiated(&self) -> impl Iterator<Item = (&NodeId, &Session)> + Clone {
         self.0
             .iter()
-            .filter_map(move |(addr, sess)| match &sess.state {
-                session::State::Negotiated { id, .. } => Some((addr, id, sess)),
+            .filter_map(move |(_, sess)| match &sess.state {
+                session::State::Negotiated { id, .. } => Some((id, sess)),
                 _ => None,
             })
     }
 
     /// Iterator over mutable fully negotiated peers.
-    pub fn negotiated_mut(&mut self) -> impl Iterator<Item = (&net::SocketAddr, &mut Session)> {
+    pub fn negotiated_mut(&mut self) -> impl Iterator<Item = (&NodeId, &mut Session)> {
         self.0.iter_mut().filter(move |(_, p)| p.is_negotiated())
     }
 }
 
 impl Deref for Sessions {
-    type Target = AddressBook<net::SocketAddr, Session>;
+    type Target = AddressBook<NodeId, Session>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -1336,7 +1259,6 @@ mod gossip {
         timestamp: Timestamp,
         storage: &S,
         signer: &G,
-        filter: Filter,
         config: &Config,
     ) -> Vec<Message> {
         let inventory = match storage.inventory() {
@@ -1359,7 +1281,7 @@ mod gossip {
                     .expect("external addresses are within the limit"),
             ),
             Message::inventory(gossip::inventory(timestamp, inventory), signer),
-            Message::subscribe(filter, timestamp, Timestamp::MAX),
+            Message::subscribe(config.filter(), timestamp, Timestamp::MAX),
         ];
         if let Some(m) = gossip::node(timestamp, config) {
             msgs.push(Message::node(m, signer));

@@ -25,8 +25,6 @@ use crate::storage::git as storage;
 /// The logical clock we use to order operations to patches.
 pub use clock::Lamport as Clock;
 
-use super::op::Ops;
-
 /// Type name of a patch.
 pub static TYPENAME: Lazy<TypeName> =
     Lazy::new(|| FromStr::from_str("xyz.radicle.patch").expect("type name is valid"));
@@ -120,8 +118,8 @@ pub struct Patch {
     pub title: LWWReg<Max<String>>,
     /// Patch description.
     pub description: LWWReg<Max<String>>,
-    /// Current state of the patch.
-    pub state: LWWReg<Max<State>>,
+    /// Current status of the patch.
+    pub status: LWWReg<Max<Status>>,
     /// Target this patch is meant to be merged in.
     pub target: LWWReg<Max<MergeTarget>>,
     /// Associated tags.
@@ -135,7 +133,7 @@ impl Semilattice for Patch {
     fn merge(&mut self, other: Self) {
         self.title.merge(other.title);
         self.description.merge(other.description);
-        self.state.merge(other.state);
+        self.status.merge(other.status);
         self.target.merge(other.target);
         self.tags.merge(other.tags);
         self.revisions.merge(other.revisions);
@@ -147,7 +145,7 @@ impl Default for Patch {
         Self {
             title: Max::from(String::default()).into(),
             description: Max::from(String::default()).into(),
-            state: Max::from(State::default()).into(),
+            status: Max::from(Status::default()).into(),
             target: Max::from(MergeTarget::default()).into(),
             tags: LWWSet::default(),
             revisions: GMap::default(),
@@ -160,8 +158,8 @@ impl Patch {
         self.title.get().get()
     }
 
-    pub fn state(&self) -> State {
-        *self.state.get().get()
+    pub fn status(&self) -> Status {
+        *self.status.get().get()
     }
 
     pub fn target(&self) -> MergeTarget {
@@ -217,11 +215,11 @@ impl Patch {
     }
 
     pub fn is_proposed(&self) -> bool {
-        matches!(self.state.get().get(), State::Proposed)
+        matches!(self.status.get().get(), Status::Proposed)
     }
 
     pub fn is_archived(&self) -> bool {
-        matches!(self.state.get().get(), &State::Archived)
+        matches!(self.status.get().get(), &Status::Archived)
     }
 
     /// Apply a list of operations to the state.
@@ -329,8 +327,8 @@ impl store::FromHistory for Patch {
         history: &radicle_cob::History,
     ) -> Result<(Self, clock::Lamport), store::Error> {
         let obj = history.traverse(Self::default(), |mut acc, entry| {
-            if let Ok(Ops(ops)) = Ops::try_from(entry) {
-                if let Err(err) = acc.apply(ops) {
+            if let Ok(op) = Op::try_from(entry) {
+                if let Err(err) = acc.apply([op]) {
                     log::warn!("Error applying op to patch state: {err}");
                     return ControlFlow::Break(acc);
                 }
@@ -383,7 +381,7 @@ impl Revision {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum State {
+pub enum Status {
     #[default]
     Proposed,
     Draft,
@@ -978,7 +976,7 @@ mod test {
         assert_eq!(patch.title(), "My first patch");
         assert_eq!(patch.description(), Some("Blah blah blah."));
         assert_eq!(patch.author().id(), &author);
-        assert_eq!(patch.state(), State::Proposed);
+        assert_eq!(patch.status(), Status::Proposed);
         assert_eq!(patch.target(), target);
         assert_eq!(patch.version(), 0);
 

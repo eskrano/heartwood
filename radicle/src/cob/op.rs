@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use nonempty::NonEmpty;
 use thiserror::Error;
 
 use radicle_cob::history::EntryWithClock;
@@ -36,32 +35,18 @@ pub struct Op<A> {
     pub timestamp: clock::Physical,
 }
 
-pub struct Ops<A>(pub NonEmpty<Op<A>>);
-
-impl<'a, A> TryFrom<&'a EntryWithClock> for Ops<A>
-where
-    for<'de> A: serde::Deserialize<'de>,
-{
+impl<'a: 'de, 'de, A: serde::Deserialize<'de>> TryFrom<&'a EntryWithClock> for Op<A> {
     type Error = OpDecodeError;
 
     fn try_from(entry: &'a EntryWithClock) -> Result<Self, Self::Error> {
-        let mut clock = entry.clock().into();
-        entry
-            .contents()
-            .clone()
-            .try_map(|op| {
-                let action = serde_json::from_slice(&op)?;
-                let op = Op {
-                    action,
-                    author: *entry.actor(),
-                    clock,
-                    timestamp: entry.timestamp().into(),
-                };
-                clock.tick();
+        let action = serde_json::from_slice(entry.contents())?;
 
-                Ok(op)
-            })
-            .map(Self)
+        Ok(Op {
+            action,
+            author: *entry.actor(),
+            clock: entry.clock().into(),
+            timestamp: entry.timestamp().into(),
+        })
     }
 }
 

@@ -10,27 +10,10 @@ use qcheck::Arbitrary;
 
 use crate::collections::HashMap;
 use crate::git;
-use crate::identity::{project::Doc, Did, Id};
+use crate::identity::{project::Delegate, project::Doc, Did, Id};
 use crate::storage;
 use crate::storage::refs::{Refs, SignedRefs};
 use crate::test::storage::MockStorage;
-
-pub fn oid() -> storage::Oid {
-    let oid_bytes: [u8; 20] = gen(1);
-    storage::Oid::try_from(oid_bytes.as_slice()).unwrap()
-}
-
-pub fn refstring(len: usize) -> git::RefString {
-    let mut buf = Vec::<u8>::new();
-    for _ in 0..len {
-        buf.push(fastrand::u8(0x61..0x7a));
-    }
-    std::str::from_utf8(&buf)
-        .unwrap()
-        .to_string()
-        .try_into()
-        .unwrap()
-}
 
 pub fn set<T: Eq + Hash + Arbitrary>(range: impl RangeBounds<usize>) -> HashSet<T> {
     let size = fastrand::usize(range);
@@ -74,12 +57,21 @@ impl Arbitrary for Did {
     }
 }
 
+impl Arbitrary for Delegate {
+    fn arbitrary(g: &mut qcheck::Gen) -> Self {
+        Self {
+            name: String::arbitrary(g),
+            id: Did::arbitrary(g),
+        }
+    }
+}
+
 impl Arbitrary for Doc<Unverified> {
     fn arbitrary(g: &mut qcheck::Gen) -> Self {
         let name = String::arbitrary(g);
         let description = String::arbitrary(g);
         let default_branch = git::RefString::try_from(String::arbitrary(g)).unwrap();
-        let delegate = Did::arbitrary(g);
+        let delegate = Delegate::arbitrary(g);
 
         Self::initial(name, description, default_branch, delegate)
     }
@@ -99,11 +91,16 @@ impl Arbitrary for Doc<Verified> {
             .collect::<String>()
             .try_into()
             .unwrap();
-        let delegates: NonEmpty<_> = iter::repeat_with(|| Did::arbitrary(g))
-            .take(rng.usize(1..6))
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+        let delegates: NonEmpty<_> = iter::repeat_with(|| Delegate {
+            name: iter::repeat_with(|| rng.alphanumeric())
+                .take(rng.usize(1..16))
+                .collect(),
+            id: Did::arbitrary(g),
+        })
+        .take(rng.usize(1..6))
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
         let threshold = delegates.len() / 2 + 1;
         let doc: Doc<Unverified> =
             Doc::new(name, description, default_branch, delegates, threshold);

@@ -8,7 +8,7 @@ use crate::terminal as term;
 use crate::terminal::args::{Args, Error, Help};
 
 use radicle::cob::common::{Reaction, Tag};
-use radicle::cob::issue::{CloseReason, IssueId, Issues, State};
+use radicle::cob::issue::{CloseReason, IssueId, Issues, Status};
 use radicle::storage::WriteStorage;
 
 pub const HELP: Help = Help {
@@ -59,7 +59,7 @@ pub enum Operation {
     },
     State {
         id: IssueId,
-        state: State,
+        state: Status,
     },
     Delete {
         id: IssueId,
@@ -86,7 +86,7 @@ impl Args for Options {
         let mut title: Option<String> = None;
         let mut reaction: Option<Reaction> = None;
         let mut description: Option<String> = None;
-        let mut state: Option<State> = None;
+        let mut state: Option<Status> = None;
 
         while let Some(arg) = parser.next()? {
             match arg {
@@ -97,15 +97,15 @@ impl Args for Options {
                     title = Some(parser.value()?.to_string_lossy().into());
                 }
                 Long("closed") if op == Some(OperationName::State) => {
-                    state = Some(State::Closed {
+                    state = Some(Status::Closed {
                         reason: CloseReason::Other,
                     });
                 }
                 Long("open") if op == Some(OperationName::State) => {
-                    state = Some(State::Open);
+                    state = Some(Status::Open);
                 }
                 Long("solved") if op == Some(OperationName::State) => {
-                    state = Some(State::Closed {
+                    state = Some(Status::Closed {
                         reason: CloseReason::Solved,
                     });
                 }

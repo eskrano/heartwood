@@ -1,6 +1,8 @@
+use amplify::Wrapper;
 use std::net;
 
 use bloomy::BloomFilter;
+use cyphernet::addr::{HostAddr, NetAddr};
 use qcheck::Arbitrary;
 
 use crate::crypto;
@@ -56,9 +58,7 @@ impl Arbitrary for Message {
                 node: NodeId::arbitrary(g),
                 message: RefsAnnouncement {
                     id: Id::arbitrary(g),
-                    refs: BoundedVec::collect_from(
-                        &mut Refs::arbitrary(g).iter().map(|(k, v)| (k.clone(), *v)),
-                    ),
+                    refs: Refs::arbitrary(g),
                     timestamp: Timestamp::arbitrary(g),
                 }
                 .into(),
@@ -104,19 +104,16 @@ impl Arbitrary for Message {
 
 impl Arbitrary for Address {
     fn arbitrary(g: &mut qcheck::Gen) -> Self {
-        if bool::arbitrary(g) {
-            Address::Ipv4 {
-                ip: net::Ipv4Addr::from(u32::arbitrary(g)),
-                port: u16::arbitrary(g),
-            }
+        let ip = if bool::arbitrary(g) {
+            net::IpAddr::V4(net::Ipv4Addr::from(u32::arbitrary(g)))
         } else {
             let octets: [u8; 16] = Arbitrary::arbitrary(g);
-
-            Address::Ipv6 {
-                ip: net::Ipv6Addr::from(octets),
-                port: u16::arbitrary(g),
-            }
-        }
+            net::IpAddr::V6(net::Ipv6Addr::from(octets))
+        };
+        Address::from_inner(NetAddr {
+            host: HostAddr::Ip(ip),
+            port: Some(u16::arbitrary(g)),
+        })
     }
 }
 
