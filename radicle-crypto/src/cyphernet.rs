@@ -1,8 +1,13 @@
 use amplify::{From, Wrapper};
+use cyphernet::crypto::EcPk;
 use cyphernet::crypto::{EcPk, EcSig, EcSk, Ecdh};
 use ed25519_compact::x25519;
+use ed25519_compact::Error;
 
-use crate::{PublicKey, SecretKey, Signature};
+use crate::ssh::keystore::MemorySigner;
+use crate::{PublicKey, SharedSecret};
+
+impl EcPk for PublicKey {}
 
 #[derive(Wrapper, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug, From)]
 #[wrapper(Deref)]
@@ -39,5 +44,15 @@ impl EcSig for Signature {
 
     fn verify(self, pk: &PublicKey, msg: impl AsRef<[u8]>) -> bool {
         pk.0.verify(msg, &self.0).is_ok()
+    }
+}
+
+impl cyphernet::crypto::Ecdh for MemorySigner {
+    type Pk = PublicKey;
+    type Secret = SharedSecret;
+    type Err = Error;
+
+    fn ecdh(&self, pk: &Self::Pk) -> Result<SharedSecret, Self::Err> {
+        crate::Ecdh::ecdh(self, pk)
     }
 }

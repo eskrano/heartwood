@@ -4,7 +4,7 @@ use crossbeam_channel as chan;
 use nakamoto_net::{LocalTime, Reactor};
 use thiserror::Error;
 
-use radicle::crypto::Signer;
+use radicle::crypto::{Ecdh, Signer};
 
 use crate::profile::Profile;
 use crate::service::{routing, tracking};
@@ -101,7 +101,7 @@ impl<R: Reactor> Client<R> {
         })
     }
 
-    pub fn run<G: Signer>(
+    pub fn run<G: Signer + Ecdh + Clone>(
         mut self,
         config: Config,
         profile: Profile,
