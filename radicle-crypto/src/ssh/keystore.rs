@@ -1,4 +1,3 @@
-use cyphernet::crypto::{EcPk, Ecdh};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -140,9 +139,11 @@ impl Signer for MemorySigner {
     }
 }
 
-impl EcPk for PublicKey {}
+#[cfg(feature = "cyphernet")]
+impl cyphernet::crypto::EcPk for PublicKey {}
 
-impl Ecdh for MemorySigner {
+#[cfg(feature = "cyphernet")]
+impl cyphernet::crypto::Ecdh for MemorySigner {
     type Pk = PublicKey;
     type Secret = SharedSecret;
     type Err = ed25519_compact::Error;

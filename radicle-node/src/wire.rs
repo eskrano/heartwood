@@ -1,13 +1,8 @@
-pub mod message;
-#[cfg(feature = "new_arch")]
-mod new;
-#[cfg(not(feature = "new_arch"))]
-mod old;
+mod message;
+mod protocol;
 
-#[cfg(feature = "new_arch")]
-pub use new::Wire;
-#[cfg(not(feature = "new_arch"))]
-pub use old::Wire;
+pub use message::AddressType;
+pub use protocol::Wire;
 
 use std::collections::BTreeMap;
 use std::convert::TryFrom;

@@ -1,4 +1,3 @@
-use cyphernet::crypto::Ecdh;
 use std::cmp::Ordering;
 use std::{fmt, ops::Deref, str::FromStr};
 
@@ -41,8 +40,9 @@ impl SignerError {
     }
 }
 
+#[cfg(feature = "cyphernet")]
 pub trait Negotiator:
-    Ecdh<Pk = PublicKey, Secret = SharedSecret, Err = ed25519_compact::Error> + Clone
+    cyphernet::crypto::Ecdh<Pk = PublicKey, Secret = SharedSecret, Err = Error> + Clone
 {
 }
 
