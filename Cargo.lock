@@ -2178,6 +2178,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "radicle-dag"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "qcheck",
+ "qcheck-macros",
+]
+
+[[package]]
 name = "radicle-git-ext"
 version = "0.2.0"
 source = "git+https://github.com/radicle-dev/radicle-git?rev=79a94721366490053e2d8ac1c1afa14fb0c25f09#79a94721366490053e2d8ac1c1afa14fb0c25f09"
