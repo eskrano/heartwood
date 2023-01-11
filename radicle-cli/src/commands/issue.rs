@@ -25,7 +25,7 @@ Usage
     rad issue show <id>
     rad issue state <id> [--closed | --open | --solved]
     rad issue delete <id>
-    rad issue react <id> [--emoji <char>]
+    rad issue react <id> [--reaction <char>]
     rad issue list [--assigned <key>]
 
 Options
@@ -207,22 +207,6 @@ pub fn run(options: Options, ctx: impl term::Context) -> anyhow::Result<()> {
         } => {
             issues.create(title, description, &[], &signer)?;
         }
-        Operation::Show { id } => {
-            let issue = issues
-                .get(&id)?
-                .context("No issue with the given ID exists")?;
-            show_issue(&issue)?;
-        }
-        Operation::State { id, state } => {
-            let mut issue = issues.get_mut(&id)?;
-            issue.lifecycle(state, &signer)?;
-        }
-        Operation::React { id, reaction } => {
-            if let Ok(mut issue) = issues.get_mut(&id) {
-                let comment_id = term::comment_select(&issue).unwrap();
-                issue.react(comment_id, reaction, &signer)?;
-            }
-        }
         Operation::Create { title, description } => {
             let meta = Metadata {
                 title: title.unwrap_or("Enter a title".to_owned()),
@@ -265,6 +249,22 @@ pub fn run(options: Options, ctx: impl term::Context) -> anyhow::Result<()> {
                     meta.labels.as_slice(),
                     &signer,
                 )?;
+            }
+        }
+        Operation::Show { id } => {
+            let issue = issues
+                .get(&id)?
+                .context("No issue with the given ID exists")?;
+            show_issue(&issue)?;
+        }
+        Operation::State { id, state } => {
+            let mut issue = issues.get_mut(&id)?;
+            issue.lifecycle(state, &signer)?;
+        }
+        Operation::React { id, reaction } => {
+            if let Ok(mut issue) = issues.get_mut(&id) {
+                let comment_id = term::comment_select(&issue).unwrap();
+                issue.react(comment_id, reaction, &signer)?;
             }
         }
         Operation::List { assigned } => {
