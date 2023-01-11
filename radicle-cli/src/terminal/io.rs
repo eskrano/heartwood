@@ -394,3 +394,68 @@ pub fn markdown(content: &str) {
 fn _info(args: std::fmt::Arguments) {
     println!("{}", args);
 }
+
+pub mod proposal {
+    use std::fmt::Write as _;
+
+    use radicle::cob::identity::{self, Proposal};
+
+    use super::{super::format, theme};
+
+    pub fn revision_select(
+        proposal: &Proposal,
+    ) -> Option<(&identity::RevisionId, &identity::Revision)> {
+        let selection = dialoguer::Select::with_theme(&theme())
+            .with_prompt("Which revision do you want to select?")
+            .item(proposal.description().unwrap_or_default())
+            .items(
+                &proposal
+                    .revisions()
+                    .map(|(_, r)| serde_json::to_string(&r.proposed).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+            .default(0)
+            .interact_opt()
+            .unwrap();
+
+        selection.and_then(|n| proposal.revisions().nth(n))
+    }
+
+    pub fn revision_publish_select(
+        proposal: &Proposal,
+    ) -> Option<(&identity::RevisionId, &identity::Revision)> {
+        let selection = dialoguer::Select::with_theme(&theme())
+            .with_prompt("Which revision do you want to publish?")
+            .item(proposal.description().unwrap_or_default())
+            .items(
+                &proposal
+                    .revisions()
+                    .filter(|(_, r)| r.reaches_quorum())
+                    .map(|(_, r)| serde_json::to_string(&r.proposed).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+            .default(0)
+            .interact_opt()
+            .unwrap();
+
+        selection.and_then(|n| proposal.revisions().nth(n))
+    }
+
+    pub fn diff(proposal: &identity::Revision) -> anyhow::Result<String> {
+        use similar::{ChangeTag, TextDiff};
+
+        let new = serde_json::to_string_pretty(&proposal.proposed)?;
+        let previous = serde_json::to_string_pretty(&proposal.previous.doc)?;
+        let diff = TextDiff::from_lines(&previous, &new);
+        let mut buf = String::new();
+        for change in diff.iter_all_changes() {
+            match change.tag() {
+                ChangeTag::Delete => write!(buf, "{}", format::negative(format!("-{}", change)))?,
+                ChangeTag::Insert => write!(buf, "{}", format::positive(format!("+{}", change)))?,
+                ChangeTag::Equal => write!(buf, " {}", change)?,
+            };
+        }
+
+        Ok(buf)
+    }
+}
