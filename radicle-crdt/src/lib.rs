@@ -3,6 +3,7 @@
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::type_complexity)]
 pub mod clock;
+pub mod gate;
 pub mod gmap;
 pub mod lwwmap;
 pub mod lwwreg;
@@ -16,6 +17,7 @@ pub mod test;
 ////////////////////////////////////////////////////////////////////////////////
 
 pub use clock::Lamport;
+pub use gate::Gate;
 pub use gmap::GMap;
 pub use lwwmap::LWWMap;
 pub use lwwreg::LWWReg;
