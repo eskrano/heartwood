@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::handler::Handler;
 use axum::http::{header, HeaderValue};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use axum_auth::AuthBearer;
 use hyper::StatusCode;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use radicle::cob::issue::Issues;
+use radicle::cob::issue::{Action, Issues};
 use radicle::cob::thread::{self, CommentId};
 use radicle::cob::{Tag, Timestamp};
 use radicle::identity::{Id, PublicKey};
@@ -52,7 +52,10 @@ pub fn router(ctx: Context) -> Router {
             "/projects/:project/issues",
             post(issue_create_handler).get(issues_handler),
         )
-        .route("/projects/:project/issues/:id", get(issue_handler))
+        .route(
+            "/projects/:project/issues/:id",
+            patch(issue_update_handler).get(issue_handler),
+        )
         .with_state(ctx)
 }
 
@@ -410,8 +413,8 @@ pub struct IssueCreate {
     pub tags: Vec<Tag>,
 }
 
-// // Create a new issue
-// // `POST /projects/:project/issues`
+/// Create a new issue
+/// `POST /projects/:project/issues`
 async fn issue_create_handler(
     State(ctx): State<Context>,
     AuthBearer(token): AuthBearer,
@@ -427,6 +430,38 @@ async fn issue_create_handler(
     issues
         .create(issue.title, issue.description, &issue.tags, &signer)
         .map_err(Error::from)?;
+
+    Ok::<_, Error>(())
+}
+
+/// Update an issue
+/// `PATCH /projects/:project/issues/:id`
+async fn issue_update_handler(
+    State(ctx): State<Context>,
+    AuthBearer(token): AuthBearer,
+    Path((project, issue_id)): Path<(Id, Oid)>,
+    Json(action): Json<Action>,
+) -> impl IntoResponse {
+    let sessions = ctx.sessions.write().await;
+    sessions.get(&token).ok_or(Error::Auth("Unauthorized"))?;
+    let storage = &ctx.profile.storage;
+    let signer = ctx.profile.signer().unwrap();
+    let repo = storage.repository(project)?;
+    let mut issues = Issues::open(ctx.profile.public_key, &repo)?;
+    let mut issue = issues.get_mut(&issue_id.into())?;
+    match action {
+        Action::Assign { add, remove } => {
+            issue.assign(add, &signer)?;
+            issue.assign(remove, &signer)?;
+        }
+        Action::Lifecycle { state } => {
+            issue.lifecycle(state, &signer)?;
+        }
+        Action::Tag { add, remove } => {
+            issue.tag(add, remove, &signer)?;
+        }
+        _ => todo!("Not implemented yet"),
+    };
 
     Ok::<_, Error>(())
 }
