@@ -452,7 +452,7 @@ async fn issue_update_handler(
     match action {
         Action::Assign { add, remove } => {
             issue.assign(add, &signer)?;
-            issue.assign(remove, &signer)?;
+            issue.unassign(remove, &signer)?;
         }
         Action::Lifecycle { state } => {
             issue.lifecycle(state, &signer)?;
@@ -460,7 +460,30 @@ async fn issue_update_handler(
         Action::Tag { add, remove } => {
             issue.tag(add, remove, &signer)?;
         }
-        _ => todo!("Not implemented yet"),
+        Action::Edit { title } => {
+            issue.edit(title, &signer)?;
+        }
+        Action::Thread { action } => {
+            let mut actor = thread::Actor::new(ctx.profile.signer().unwrap());
+            match action {
+                thread::Action::Comment { body, reply_to } => {
+                    if let Some(reply_to) = reply_to {
+                        issue.comment(body, reply_to, &signer)?;
+                    } else {
+                        issue.thread(body, &signer)?;
+                    }
+                }
+                thread::Action::React { to, reaction, .. } => {
+                    issue.react(to, reaction, &signer)?;
+                }
+                thread::Action::Edit { id, body } => {
+                    actor.edit(id, &body);
+                }
+                thread::Action::Redact { id } => {
+                    actor.redact(id);
+                }
+            }
+        }
     };
 
     Ok::<_, Error>(())
