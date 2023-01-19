@@ -4,8 +4,9 @@ use axum::extract::State;
 use axum::handler::Handler;
 use axum::http::{header, HeaderValue};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum_auth::AuthBearer;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -13,7 +14,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use radicle::cob::issue::Issues;
 use radicle::cob::thread::{self, CommentId};
-use radicle::cob::Timestamp;
+use radicle::cob::{Tag, Timestamp};
 use radicle::identity::{Id, PublicKey};
 use radicle::node::NodeId;
 use radicle::storage::{git::paths, ReadRepository, WriteStorage};
@@ -47,7 +48,10 @@ pub fn router(ctx: Context) -> Router {
         .route("/projects/:project/remotes/:peer", get(remote_handler))
         .route("/projects/:project/blob/:sha/*path", get(blob_handler))
         .route("/projects/:project/readme/:sha", get(readme_handler))
-        .route("/projects/:project/issues", get(issues_handler))
+        .route(
+            "/projects/:project/issues",
+            post(issue_create_handler).get(issues_handler),
+        )
         .route("/projects/:project/issues/:id", get(issue_handler))
         .with_state(ctx)
 }
@@ -397,6 +401,34 @@ async fn issues_handler(
         .collect::<Vec<_>>();
 
     Ok::<_, Error>(Json(issues))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IssueCreate {
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<Tag>,
+}
+
+// // Create a new issue
+// // `POST /projects/:project/issues`
+async fn issue_create_handler(
+    State(ctx): State<Context>,
+    AuthBearer(token): AuthBearer,
+    Path(project): Path<Id>,
+    Json(issue): Json<IssueCreate>,
+) -> impl IntoResponse {
+    let sessions = ctx.sessions.write().await;
+    sessions.get(&token).ok_or(Error::Auth("Unauthorized"))?;
+    let storage = &ctx.profile.storage;
+    let signer = ctx.profile.signer().unwrap();
+    let repo = storage.repository(project)?;
+    let mut issues = Issues::open(ctx.profile.public_key, &repo)?;
+    issues
+        .create(issue.title, issue.description, &issue.tags, &signer)
+        .map_err(Error::from)?;
+
+    Ok::<_, Error>(())
 }
 
 /// Get project issue.
