@@ -134,7 +134,7 @@ impl Storage {
                 let name = r.name().ok_or(Error::InvalidRef)?;
                 let oid = r.target().ok_or(Error::InvalidRef)?;
 
-                println!("{} {} {}", proj, oid, name);
+                println!("{} {} {}", proj.urn(), oid, name);
             }
         }
         Ok(())
@@ -732,7 +732,7 @@ pub mod paths {
     use super::ReadStorage;
 
     pub fn repository<S: ReadStorage>(storage: &S, proj: &Id) -> PathBuf {
-        storage.path().join(proj.to_string())
+        storage.path().join(proj.canonical())
     }
 }
 
