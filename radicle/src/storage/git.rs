@@ -261,6 +261,29 @@ impl Repository {
         Ok(())
     }
 
+    /// Iterate over all references.
+    pub fn references(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<(RemoteId, Qualified, Oid), refs::Error>>, git2::Error>
+    {
+        let refs = self
+            .backend
+            .references()?
+            .map(|reference| {
+                let r = reference?;
+                let name = r.name().ok_or(refs::Error::InvalidRef)?;
+                let (namespace, refname) = git::parse_ref_namespaced::<RemoteId>(name)?;
+                let Some(oid) = r.target() else {
+                    // Ignore symbolic refs, eg. `HEAD`.
+                    return Ok(None);
+                };
+                Ok(Some((namespace, refname.to_owned(), oid.into())))
+            })
+            .filter_map(Result::transpose);
+
+        Ok(refs)
+    }
+
     pub fn identity(&self, remote: &RemoteId) -> Result<Identity<Oid>, IdentityError> {
         Identity::load(remote, self)
     }
@@ -448,7 +471,7 @@ impl ReadRepository for Repository {
         Ok(Remote::new(*remote, refs))
     }
 
-    fn references(&self, remote: &RemoteId) -> Result<Refs, Error> {
+    fn references_of(&self, remote: &RemoteId) -> Result<Refs, Error> {
         // TODO: Only return known refs, eg. heads/ rad/ tags/ etc..
         let entries = self
             .backend
@@ -670,7 +693,7 @@ impl WriteRepository for Repository {
 
     fn sign_refs<G: Signer>(&self, signer: &G) -> Result<SignedRefs<Verified>, Error> {
         let remote = signer.public_key();
-        let refs = self.references(remote)?;
+        let refs = self.references_of(remote)?;
         let signed = refs.signed(signer)?;
 
         signed.save(remote, self)?;
@@ -929,7 +952,7 @@ mod tests {
 
         let signed = project.sign_refs(&signer).unwrap();
         let remote = project.remote(&alice).unwrap();
-        let mut unsigned = project.references(&alice).unwrap();
+        let mut unsigned = project.references_of(&alice).unwrap();
 
         // The signed refs doesn't contain the signature ref itself.
         let sigref = (*SIGREFS_BRANCH).to_ref_string();
